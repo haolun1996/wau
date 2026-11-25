@@ -9,7 +9,11 @@ import WebKit
 /// a time. Command bar and Space features live in extensions in other files.
 @MainActor
 final class BrowserWindowController: NSWindowController, NSWindowDelegate {
-    static let sidebarWidth: CGFloat = 240
+    static let defaultSidebarWidth: CGFloat = 240
+    static let sidebarWidthRange: ClosedRange<CGFloat> = 200...420
+    /// The page keeps at least this much room when the sidebar is widened.
+    private static let minimumPageWidth: CGFloat = 360
+    private static let sidebarWidthDefaultsKey = "WauSidebarWidth"
     static let inset: CGFloat = 8
     static let homeURL = URL(string: "https://www.google.com")!
     static let logger = Logger(subsystem: "dev.wau.Wau", category: "Window")
@@ -39,6 +43,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     private let backdrop = ThemeBackdropView()
     private var sidebarLeading: NSLayoutConstraint!
     private var contentLeading: NSLayoutConstraint!
+    private var sidebarWidthConstraint: NSLayoutConstraint!
+    private let sidebarResizeHandle = SidebarResizeHandle()
     private(set) var isSidebarVisible = true
     var commandBar: CommandBarView?
     var swipeMonitor: Any?
@@ -157,14 +163,27 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         background.addSubview(sidebarView)
         background.addSubview(content)
         background.addSubview(easelCanvas)
+        // Above the page so it wins the clicks along the shared edge.
+        sidebarResizeHandle.translatesAutoresizingMaskIntoConstraints = false
+        background.addSubview(sidebarResizeHandle)
 
+        let savedWidth = UserDefaults.standard.double(forKey: Self.sidebarWidthDefaultsKey)
+        let width = savedWidth > 0 ? CGFloat(savedWidth) : Self.defaultSidebarWidth
+        sidebarWidthConstraint = sidebarView.widthAnchor.constraint(
+            equalToConstant: min(max(width, Self.sidebarWidthRange.lowerBound), Self.sidebarWidthRange.upperBound)
+        )
         sidebarLeading = sidebarView.leadingAnchor.constraint(equalTo: background.leadingAnchor)
         contentLeading = content.leadingAnchor.constraint(equalTo: sidebarView.trailingAnchor)
         NSLayoutConstraint.activate([
             sidebarLeading,
             sidebarView.topAnchor.constraint(equalTo: background.topAnchor),
             sidebarView.bottomAnchor.constraint(equalTo: background.bottomAnchor),
-            sidebarView.widthAnchor.constraint(equalToConstant: Self.sidebarWidth),
+            sidebarWidthConstraint,
+
+            sidebarResizeHandle.leadingAnchor.constraint(equalTo: sidebarView.trailingAnchor, constant: -5),
+            sidebarResizeHandle.widthAnchor.constraint(equalToConstant: 8),
+            sidebarResizeHandle.topAnchor.constraint(equalTo: content.topAnchor),
+            sidebarResizeHandle.bottomAnchor.constraint(equalTo: content.bottomAnchor),
 
             contentLeading,
             content.topAnchor.constraint(equalTo: background.topAnchor, constant: Self.inset),
@@ -178,6 +197,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         ])
 
         sidebar.onNewTab = { [weak self] in self?.newTab(nil) }
+        sidebar.onToggleSidebar = { [weak self] in self?.toggleBrowserSidebar(nil) }
         sidebar.onSplitWith = { [weak self] tab in self?.model.addToSplit(tab) }
         sidebar.easelsInSpace = { [weak self] in
             guard let self else { return [] }
@@ -186,6 +206,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         sidebar.shownEaselID = { [weak self] in self?.shownEaselID }
         sidebar.onSelectEasel = { [weak self] easel in self?.showEasel(easel.id) }
         sidebar.onDeleteEasel = { [weak self] easel in self?.confirmDelete(easel) }
+        sidebar.onRenameEasel = { [weak self] easel in self?.rename(easel) }
+        sidebar.onMoveEasel = { [weak self] easel, gap in self?.easels.move(easel.id, toGap: gap) }
         sidebar.onTabChosen = { [weak self] in self?.hideEasel() }
         content.onFocusPane = { [weak self] index in
             guard let self else { return }
@@ -200,6 +222,20 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         sidebar.onNewSpace = { [weak self] in self?.newSpace(nil) }
         sidebar.onEditSpace = { [weak self] space in self?.presentSpaceEditor(for: space) }
         sidebar.onDeleteSpace = { [weak self] space in self?.confirmDelete(space) }
+
+        sidebarResizeHandle.currentWidth = { [weak self] in self?.sidebarWidthConstraint.constant ?? 0 }
+        sidebarResizeHandle.onResize = { [weak self] width in self?.setSidebarWidth(width) }
+        sidebarResizeHandle.onResizeEnded = { [weak self] in
+            guard let self else { return }
+            UserDefaults.standard.set(Double(sidebarWidthConstraint.constant), forKey: Self.sidebarWidthDefaultsKey)
+        }
+    }
+
+    /// Clamped so the sidebar stays usable and the page keeps some room.
+    private func setSidebarWidth(_ width: CGFloat) {
+        let windowWidth = window?.frame.width ?? .greatestFiniteMagnitude
+        let upper = max(Self.sidebarWidthRange.lowerBound, min(Self.sidebarWidthRange.upperBound, windowWidth - Self.minimumPageWidth))
+        sidebarWidthConstraint.constant = min(max(width, Self.sidebarWidthRange.lowerBound), upper)
     }
 
     private func bindModel() {
@@ -356,11 +392,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         // When the sidebar slides out the traffic lights would float over
         // the page, so hide them with it.
         if visible { setTrafficLightsHidden(false) }
+        sidebarResizeHandle.isHidden = !visible
+        let width = sidebarWidthConstraint.constant
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.22
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             context.allowsImplicitAnimation = true
-            sidebarLeading.animator().constant = visible ? 0 : -Self.sidebarWidth
+            sidebarLeading.animator().constant = visible ? 0 : -width
             contentLeading.animator().constant = visible ? 0 : Self.inset
             background.layoutSubtreeIfNeeded()
         } completionHandler: { [weak self] in
@@ -448,9 +486,11 @@ extension BrowserWindowController: NSMenuItemValidation {
             return model.spaces.count > 1
         case #selector(deleteSpace(_:)):
             return model.spaces.count > 1
-        case #selector(findInPage(_:)), #selector(findNext(_:)), #selector(findPrevious(_:)),
-             #selector(zoomInPage(_:)), #selector(zoomOutPage(_:)), #selector(actualSizePage(_:)):
+        case #selector(findInPage(_:)), #selector(findNext(_:)), #selector(findPrevious(_:)):
             return selected != nil && shownEaselID == nil
+        case #selector(zoomInPage(_:)), #selector(zoomOutPage(_:)), #selector(actualSizePage(_:)):
+            // On an Easel these zoom the canvas.
+            return selected != nil || shownEaselID != nil
         case #selector(selectTabNumber(_:)):
             return !(model.currentSpace.pinned + model.currentSpace.tabs).isEmpty
         case #selector(captureToEasel(_:)):

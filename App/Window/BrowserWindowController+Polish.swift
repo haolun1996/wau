@@ -60,16 +60,19 @@ extension BrowserWindowController {
     private static let zoomSteps: [CGFloat] = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3]
 
     @objc func zoomInPage(_ sender: Any?) {
+        if shownEaselID != nil { easelCanvas.zoomIn(); return }
         guard let webView = model.selected?.webView else { return }
         webView.pageZoom = Self.zoomSteps.first { $0 > webView.pageZoom + 0.01 } ?? Self.zoomSteps.last!
     }
 
     @objc func zoomOutPage(_ sender: Any?) {
+        if shownEaselID != nil { easelCanvas.zoomOut(); return }
         guard let webView = model.selected?.webView else { return }
         webView.pageZoom = Self.zoomSteps.last { $0 < webView.pageZoom - 0.01 } ?? Self.zoomSteps.first!
     }
 
     @objc func actualSizePage(_ sender: Any?) {
+        if shownEaselID != nil { easelCanvas.actualSize(); return }
         model.selected?.webView.pageZoom = 1
     }
 

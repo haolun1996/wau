@@ -22,6 +22,28 @@ struct EaselStorageTests {
         #expect(try database.loadEasels() == EaselSnapshot())
     }
 
+    @Test func drawingsKeepTheirPoints() throws {
+        let database = try AppDatabase.inMemory()
+        let easel = Easel(spaceID: UUID(), title: "Sketch", createdAt: Date(timeIntervalSince1970: 1_790_000_000))
+        let stroke = EaselItem(easelID: easel.id, kind: .drawing, x: 1, y: 2, width: 80, height: 60, z: 0,
+                               points: [EaselPoint(x: 0, y: 0), EaselPoint(x: 0.5, y: 0.75), EaselPoint(x: 1, y: 1)])
+        try database.saveEasel(easel)
+        try database.saveEaselItem(stroke)
+        #expect(try database.loadEasels().items == [stroke])
+    }
+
+    @Test func labelsKeepTheirTextSize() throws {
+        let database = try AppDatabase.inMemory()
+        let easel = Easel(spaceID: UUID(), title: "Notes", createdAt: Date(timeIntervalSince1970: 1_790_000_000), position: 2)
+        let fixed = EaselItem(easelID: easel.id, kind: .text, x: 0, y: 0, width: 300, height: 200, z: 0, text: "Dada",
+                              fontSize: 32, color: "#3E8CF0")
+        let fitting = EaselItem(easelID: easel.id, kind: .text, x: 0, y: 300, width: 300, height: 200, z: 1, text: "Fit")
+        try database.saveEasel(easel)
+        try database.saveEaselItem(fixed)
+        try database.saveEaselItem(fitting)
+        #expect(try database.loadEasels().items == [fixed, fitting])
+    }
+
     @Test func saveEaselsReplacesEverything() throws {
         let database = try AppDatabase.inMemory()
         try database.saveEasel(Easel(spaceID: UUID(), title: "Old"))

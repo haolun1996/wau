@@ -4,6 +4,7 @@ import Core
 private extension NSPasteboard.PasteboardType {
     /// A tab row being dragged within the sidebar; the value is its row index.
     static let wauTabRow = NSPasteboard.PasteboardType("dev.wau.tab-row")
+    static let wauEaselRow = NSPasteboard.PasteboardType("dev.wau.easel-row")
 }
 
 /// The left column, top to bottom: navigation buttons, address pill,
@@ -13,6 +14,7 @@ private extension NSPasteboard.PasteboardType {
 final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     var onOpenLocation: (() -> Void)?
     var onNewTab: (() -> Void)?
+    var onToggleSidebar: (() -> Void)?
     var onNewSpace: (() -> Void)?
     var onEditSpace: ((Space) -> Void)?
     var onDeleteSpace: ((Space) -> Void)?
@@ -23,20 +25,23 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
     var shownEaselID: (() -> UUID?)?
     var onSelectEasel: ((Easel) -> Void)?
     var onDeleteEasel: ((Easel) -> Void)?
+    /// An Easel was dragged to a gap among the Space's Easels (0 is the top).
+    var onMoveEasel: ((Easel, Int) -> Void)?
+    var onRenameEasel: ((Easel) -> Void)?
     /// The user picked a tab in the list (leaving any Easel that was shown).
     var onTabChosen: (() -> Void)?
 
     private enum Row {
         case pinned(Tab)
         case newTab
-        case easelHeader
+        /// Easels sit in the tab list, after the tabs, and look like tabs.
         case easel(Easel)
         case regular(Tab)
 
         var tab: Tab? {
             switch self {
             case .pinned(let tab), .regular(let tab): tab
-            case .newTab, .easelHeader, .easel: nil
+            case .newTab, .easel: nil
             }
         }
     }
@@ -52,6 +57,7 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
     private let backButton = SidebarViewController.iconButton("chevron.left", "Back", #selector(BrowserWindowController.goBack(_:)))
     private let forwardButton = SidebarViewController.iconButton("chevron.right", "Forward", #selector(BrowserWindowController.goForward(_:)))
     private let reloadButton = SidebarViewController.iconButton("arrow.clockwise", "Reload", #selector(BrowserWindowController.reloadPage(_:)))
+    private let sidebarButton = SidebarViewController.iconButton("sidebar.left", "Hide Sidebar (⌘S)", #selector(toggleSidebarClicked))
     /// Set while the table is being updated from the model, so the
     /// resulting selection callbacks are not sent back to the model.
     private var isSyncingSelection = false
@@ -66,6 +72,7 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
 
     override func loadView() {
         let root = NSView()
+        sidebarButton.target = self
 
         // Sits beside the traffic lights, in the transparent title bar.
         let navRow = NSStackView(views: [backButton, forwardButton, reloadButton])
@@ -103,7 +110,7 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         tableView.delegate = self
         tableView.target = self
         tableView.action = #selector(tableClicked)
-        tableView.registerForDraggedTypes([.wauTabRow])
+        tableView.registerForDraggedTypes([.wauTabRow, .wauEaselRow])
         tableView.setDraggingSourceOperationMask(.move, forLocal: true)
         // Other rows slide apart to show where the tab will land.
         tableView.draggingDestinationFeedbackStyle = .gap
@@ -119,11 +126,16 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
 
         spaceBar.spacing = 6
 
-        for view in [navRow, pill, favoritesView, spaceHeader, scrollView, spaceBar] as [NSView] {
+        for view in [sidebarButton, navRow, pill, favoritesView, spaceHeader, scrollView, spaceBar] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(view)
         }
         NSLayoutConstraint.activate([
+            // Just right of the traffic lights.
+            sidebarButton.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 76),
+            sidebarButton.centerYAnchor.constraint(equalTo: root.topAnchor, constant: 18),
+            navRow.leadingAnchor.constraint(greaterThanOrEqualTo: sidebarButton.trailingAnchor, constant: 4),
+
             navRow.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
             navRow.centerYAnchor.constraint(equalTo: root.topAnchor, constant: 18),
 
@@ -160,10 +172,7 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
     func reloadTabs() {
         let space = model.currentSpace
         rows = space.pinned.map(Row.pinned) + [.newTab] + space.tabs.map(Row.regular)
-        let easels = easelsInSpace?() ?? []
-        if !easels.isEmpty {
-            rows += [.easelHeader] + easels.map(Row.easel)
-        }
+            + (easelsInSpace?() ?? []).map(Row.easel)
         let shownEasel = shownEaselID?()
 
         isSyncingSelection = true
@@ -293,6 +302,7 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         guard rows.indices.contains(row) else { return }
         if case .easel(let easel) = rows[row] {
             menu.addItem(ClosureMenuItem("Open Easel") { [weak self] in self?.onSelectEasel?(easel) })
+            menu.addItem(ClosureMenuItem("Rename Easel…") { [weak self] in self?.onRenameEasel?(easel) })
             menu.addItem(.separator())
             menu.addItem(ClosureMenuItem("Delete Easel…") { [weak self] in self?.onDeleteEasel?(easel) })
             return
@@ -324,10 +334,12 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         case .newTab:
             return tableView.makeView(withIdentifier: NewTabCellView.identifier, owner: nil) as? NewTabCellView
                 ?? NewTabCellView()
-        case .easelHeader:
-            return SectionHeaderCellView(title: "Easels")
         case .easel(let easel):
-            return EaselCellView(title: easel.title)
+            let cell = tableView.makeView(withIdentifier: TabCellView.identifier, owner: nil) as? TabCellView
+                ?? TabCellView()
+            cell.configure(with: easel)
+            cell.onClose = { [weak self] in self?.onDeleteEasel?(easel) }
+            return cell
         case .pinned, .regular:
             break
         }
@@ -346,13 +358,8 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
         switch rows[row] {
         case .pinned, .regular, .easel: true
-        case .newTab, .easelHeader: false
+        case .newTab: false
         }
-    }
-
-    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        if case .easelHeader = rows[row] { return 26 }
-        return tableView.rowHeight
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -370,11 +377,25 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
 
     // MARK: Drag to reorder (and across "New Tab" to pin or unpin)
 
+    // Every tab and Easel row can be dragged. Without this, pressing on an
+    // Easel and moving would drag the selection across other rows instead,
+    // switching away from the Easel.
     func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
-        guard rows[row].tab != nil else { return nil }
         let item = NSPasteboardItem()
-        item.setString(String(row), forType: .wauTabRow)
+        switch rows[row] {
+        case .pinned, .regular:
+            item.setString(String(row), forType: .wauTabRow)
+        case .easel(let easel):
+            item.setString(easel.id.uuidString, forType: .wauEaselRow)
+        case .newTab:
+            return nil
+        }
         return item
+    }
+
+    /// Where the Easels start in the list (they come after every tab).
+    private var firstEaselRow: Int {
+        rows.firstIndex { if case .easel = $0 { true } else { false } } ?? rows.count
     }
 
     func tableView(
@@ -384,8 +405,17 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         proposedDropOperation dropOperation: NSTableView.DropOperation
     ) -> NSDragOperation {
         guard (info.draggingSource as? NSTableView) === tableView else { return [] }
+        let pasteboard = info.draggingPasteboard
         // Dropping onto a row means "next to it"; tabs don't nest.
-        if dropOperation == .on { tableView.setDropRow(row, dropOperation: .above) }
+        var gap = row
+        if pasteboard.availableType(from: [.wauEaselRow]) != nil {
+            // Easels stay among the Easels, below the tabs.
+            gap = max(gap, firstEaselRow)
+        } else {
+            // Tabs stay above the Easels.
+            gap = min(gap, firstEaselRow)
+        }
+        tableView.setDropRow(gap, dropOperation: .above)
         return .move
     }
 
@@ -395,6 +425,13 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         row: Int,
         dropOperation: NSTableView.DropOperation
     ) -> Bool {
+        if let value = info.draggingPasteboard.pasteboardItems?.first?.string(forType: .wauEaselRow) {
+            guard let id = UUID(uuidString: value),
+                  let easel = rows.lazy.compactMap({ if case .easel(let easel) = $0, easel.id == id { easel } else { nil } }).first
+            else { return false }
+            onMoveEasel?(easel, max(0, row - firstEaselRow))
+            return true
+        }
         guard let value = info.draggingPasteboard.pasteboardItems?.first?.string(forType: .wauTabRow),
               let source = Int(value), rows.indices.contains(source), let tab = rows[source].tab
         else { return false }
@@ -403,10 +440,14 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         if row <= pinnedCount {
             model.moveTab(tab, to: .pinned, gap: row)
         } else {
-            // Drops below the tabs (onto the Easels) land at the end of the tabs.
+            // validateDrop keeps tab drops above the Easels.
             model.moveTab(tab, to: .regular, gap: min(row - pinnedCount - 1, model.currentSpace.tabs.count))
         }
         return true
+    }
+
+    @objc private func toggleSidebarClicked() {
+        onToggleSidebar?()
     }
 
     private static func iconButton(_ symbol: String, _ label: String, _ action: Selector) -> NSButton {
@@ -547,6 +588,7 @@ private final class TabCellView: NSTableCellView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
     func configure(with tab: Tab) {
+        closeButton.toolTip = "Close Tab"
         title.stringValue = tab.title
         toolTip = tab.url?.absoluteString
         icon.image = tab.favicon ?? NSImage(systemSymbolName: "globe", accessibilityDescription: nil)
@@ -559,6 +601,19 @@ private final class TabCellView: NSTableCellView {
             spinner.stopAnimation(nil)
             icon.isHidden = false
         }
+    }
+
+    /// An Easel in the tab list: the same row, with an Easel icon; its
+    /// close button deletes the Easel (after asking).
+    func configure(with easel: Easel) {
+        title.stringValue = easel.title
+        toolTip = nil
+        spinner.stopAnimation(nil)
+        icon.isHidden = false
+        icon.image = NSImage(systemSymbolName: "rectangle.on.rectangle.angled", accessibilityDescription: "Easel")
+        icon.contentTintColor = .secondaryLabelColor
+        isInSplit = false
+        closeButton.toolTip = "Delete Easel…"
     }
 
     @objc private func closeClicked() {
@@ -700,52 +755,4 @@ private final class FavoriteTile: NSView {
 
     override var mouseDownCanMoveWindow: Bool { false }
     override func mouseDown(with event: NSEvent) { onClick?() }
-}
-
-/// A small heading row, e.g. "Easels".
-private final class SectionHeaderCellView: NSTableCellView {
-    init(title: String) {
-        super.init(frame: .zero)
-        let label = NSTextField(labelWithString: title.uppercased())
-        label.font = .systemFont(ofSize: 10, weight: .semibold)
-        label.textColor = .tertiaryLabelColor
-        label.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(label)
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
-            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
-        ])
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
-}
-
-/// An Easel in the sidebar list.
-private final class EaselCellView: NSTableCellView {
-    init(title: String) {
-        super.init(frame: .zero)
-        let icon = NSImageView(image: NSImage(systemSymbolName: "rectangle.on.rectangle.angled", accessibilityDescription: "Easel")!)
-        icon.contentTintColor = .secondaryLabelColor
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 13)
-        label.lineBreakMode = .byTruncatingTail
-        for view in [icon, label] as [NSView] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(view)
-        }
-        imageView = icon
-        textField = label
-        NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
-            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 16),
-            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 }

@@ -40,6 +40,60 @@ struct EaselSyncTests {
         #expect(SyncMapping.easels(from: fields) == EaselSnapshot())
     }
 
+    @Test func shapesAndDrawingsRoundTripWithTheirPoints() {
+        var snapshot = sample
+        let easelID = snapshot.easels[0].id
+        snapshot.items += [
+            EaselItem(id: UUID(uuidString: "00000000-0000-0000-0000-000000000003")!, easelID: easelID, kind: .ellipse,
+                      x: 0, y: 0, width: 120, height: 80, z: 2),
+            EaselItem(id: UUID(uuidString: "00000000-0000-0000-0000-000000000004")!, easelID: easelID, kind: .arrow,
+                      x: 10, y: 10, width: 200, height: 40, z: 3,
+                      points: [EaselPoint(x: 0.05, y: 0.5), EaselPoint(x: 0.95, y: 0.5)]),
+            EaselItem(id: UUID(uuidString: "00000000-0000-0000-0000-000000000005")!, easelID: easelID, kind: .drawing,
+                      x: 50, y: 60, width: 90, height: 90, z: 4,
+                      points: [EaselPoint(x: 0, y: 1), EaselPoint(x: 0.33333333, y: 0.25), EaselPoint(x: 1, y: 0)]),
+        ]
+        let fields = SyncMapping.fields(from: snapshot)
+        #expect(fields["easelItem:00000000-0000-0000-0000-000000000003"]?["points"] == nil)
+        #expect(fields["easelItem:00000000-0000-0000-0000-000000000005"]?["points"] == "0,1 0.3333,0.25 1,0")
+        #expect(SyncMapping.easels(from: fields) == snapshot)
+    }
+
+    @Test func labelSizesRoundTripAndFittingLabelsStoreNone() {
+        var snapshot = sample
+        snapshot.items[1].fontSize = 48
+        let fields = SyncMapping.fields(from: snapshot)
+        #expect(fields["easelItem:00000000-0000-0000-0000-000000000002"]?["fontSize"] == "48")
+        #expect(fields["easelItem:00000000-0000-0000-0000-000000000001"]?["fontSize"] == nil)
+        #expect(SyncMapping.easels(from: fields) == snapshot)
+    }
+
+    @Test func coloursRoundTripAndAutomaticStoresNone() {
+        var snapshot = sample
+        snapshot.items[1].color = "#E5484D"
+        let fields = SyncMapping.fields(from: snapshot)
+        #expect(fields["easelItem:00000000-0000-0000-0000-000000000002"]?["color"] == "#E5484D")
+        #expect(fields["easelItem:00000000-0000-0000-0000-000000000001"]?["color"] == nil)
+        #expect(SyncMapping.easels(from: fields) == snapshot)
+    }
+
+    @Test func easelPositionsRoundTrip() {
+        var snapshot = sample
+        snapshot.easels[0].position = 3
+        let fields = SyncMapping.fields(from: snapshot)
+        #expect(fields["easel:00000000-0000-0000-0000-0000000000E1"]?["position"] == "3")
+        #expect(SyncMapping.easels(from: fields) == snapshot)
+        // Records from before positions existed sort as 0.
+        var old = fields
+        old["easel:00000000-0000-0000-0000-0000000000E1"]?["position"] = nil
+        #expect(SyncMapping.easels(from: old).easels.first?.position == 0)
+    }
+
+    @Test func pointDecodingSkipsMalformedPairs() {
+        #expect(EaselPoint.decode("0.5,0.5 junk 1,2,3 0,1") == [EaselPoint(x: 0.5, y: 0.5), EaselPoint(x: 0, y: 1)])
+        #expect(EaselPoint.decode("") == [])
+    }
+
     @Test func browserMappingIgnoresEaselRecords() {
         let spaceRecord = SpaceRecord(id: space, name: "Home", icon: "🪁", themeID: "bulan")
         let browser = BrowserSnapshot(spaces: [spaceRecord], tabs: [], selectedSpaceID: space)

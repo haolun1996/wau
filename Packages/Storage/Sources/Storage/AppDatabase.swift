@@ -143,6 +143,29 @@ public final class AppDatabase: Sendable {
                 t.column("imageHash", .text)
             }
         }
+        migrator.registerMigration("v8: easel drawings") { db in
+            // Arrow ends and freehand strokes, as `EaselPoint.encode` writes them.
+            try db.alter(table: "easelItem") { t in
+                t.add(column: "points", .text).notNull().defaults(to: "")
+            }
+        }
+        migrator.registerMigration("v9: label sizes") { db in
+            // Null means the label's text fills its box.
+            try db.alter(table: "easelItem") { t in
+                t.add(column: "fontSize", .double)
+            }
+        }
+        migrator.registerMigration("v10: item colours") { db in
+            // `#RRGGBB`; null is the usual text colour.
+            try db.alter(table: "easelItem") { t in
+                t.add(column: "color", .text)
+            }
+        }
+        migrator.registerMigration("v11: easel order") { db in
+            try db.alter(table: "easel") { t in
+                t.add(column: "position", .integer).notNull().defaults(to: 0)
+            }
+        }
         return migrator
     }
 
@@ -446,7 +469,7 @@ public final class AppDatabase: Sendable {
         try writer.read { db in
             let easels = try Row.fetchAll(db, sql: "SELECT * FROM easel ORDER BY createdAt").compactMap { row -> Easel? in
                 guard let id = UUID(uuidString: row["id"]), let space = UUID(uuidString: row["spaceID"]) else { return nil }
-                return Easel(id: id, spaceID: space, title: row["title"], createdAt: row["createdAt"])
+                return Easel(id: id, spaceID: space, title: row["title"], createdAt: row["createdAt"], position: row["position"])
             }
             let items = try Row.fetchAll(db, sql: "SELECT * FROM easelItem ORDER BY z").compactMap { row -> EaselItem? in
                 guard let id = UUID(uuidString: row["id"]), let easel = UUID(uuidString: row["easelID"]),
@@ -455,7 +478,10 @@ public final class AppDatabase: Sendable {
                 return EaselItem(
                     id: id, easelID: easel, kind: kind,
                     x: row["x"], y: row["y"], width: row["width"], height: row["height"], z: row["z"],
-                    text: row["text"], url: (row["url"] as String?).flatMap(URL.init(string:)), imageHash: row["imageHash"]
+                    text: row["text"], url: (row["url"] as String?).flatMap(URL.init(string:)), imageHash: row["imageHash"],
+                    points: EaselPoint.decode(row["points"]),
+                    fontSize: row["fontSize"],
+                    color: row["color"]
                 )
             }
             return EaselSnapshot(easels: easels, items: items)
@@ -495,21 +521,21 @@ public final class AppDatabase: Sendable {
 
     private static func upsert(_ easel: Easel, in db: Database) throws {
         try db.execute(
-            sql: "INSERT OR REPLACE INTO easel (id, spaceID, title, createdAt) VALUES (?, ?, ?, ?)",
-            arguments: [easel.id.uuidString, easel.spaceID.uuidString, easel.title, easel.createdAt]
+            sql: "INSERT OR REPLACE INTO easel (id, spaceID, title, createdAt, position) VALUES (?, ?, ?, ?, ?)",
+            arguments: [easel.id.uuidString, easel.spaceID.uuidString, easel.title, easel.createdAt, easel.position]
         )
     }
 
     private static func upsert(_ item: EaselItem, in db: Database) throws {
         try db.execute(
             sql: """
-            INSERT OR REPLACE INTO easelItem (id, easelID, kind, x, y, width, height, z, text, url, imageHash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO easelItem (id, easelID, kind, x, y, width, height, z, text, url, imageHash, points, fontSize, color)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             arguments: [
                 item.id.uuidString, item.easelID.uuidString, item.kind.rawValue,
                 item.x, item.y, item.width, item.height, item.z, item.text,
-                item.url?.absoluteString, item.imageHash,
+                item.url?.absoluteString, item.imageHash, EaselPoint.encode(item.points), item.fontSize, item.color,
             ]
         )
     }

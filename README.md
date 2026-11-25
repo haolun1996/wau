@@ -6,7 +6,8 @@ of Malaysia's east coast. Built natively with Swift, AppKit and WKWebView.
 ## Features
 
 - **Vertical sidebar**: favorites grid, the Space's pinned tabs, "+ New Tab", its
-  other tabs and its Easels. Drag tabs to reorder; drag across "New Tab" to pin or unpin.
+  other tabs, then its Easels as tabs too. Drag tabs to reorder; drag across
+  "New Tab" to pin or unpin.
 - **Spaces**: each with its own emoji, theme, tabs and archive setting, and
   optionally separate logins (its own cookies and site data). Switch with the
   buttons at the bottom of the sidebar, ⌃1–⌃9, ⌥⌘←/→ or a two-finger swipe.
@@ -21,8 +22,16 @@ of Malaysia's east coast. Built natively with Swift, AppKit and WKWebView.
   in Split View). Click a pane to focus it; drag the gaps to resize.
 - **Little Wau**: a compact window for quick looks (⌥⌘N) and for links
   from other apps when Wau is your default browser. ⌘O moves the page into the main window.
-- **Easels**: canvases for clippings (⇧⌘2 to clip part of a page), page
-  links and labels. Paste or drop images and links; drag, resize, delete.
+- **Easels**: canvases for clippings, page links, text, shapes and
+  drawings. The toolbar along the bottom has Select (V), Add Image, Text (T),
+  Circle (O), Rectangle (R), Arrow (A), Draw (P), Colour (recolours the
+  selected label or drawing, and is used for new ones) and Clip, which clips part of
+  a page onto the Easel (⇧⌘2 does the same from any page). Hold ⇧ for a
+  perfect circle or square, Esc puts the tool down. Paste or drop images and
+  links; drag to move, drag any edge or corner to resize, ⌫ to delete. Label text grows and shrinks with its box;
+  select a label and use the + / − pop-up beside it to pick a size instead
+  (Aa goes back to filling the box). Pinch or ⌘+ / ⌘- / ⌘0 to zoom; rename an Easel
+  from its right-click menu in the sidebar.
 - **Google Drive sync**: Spaces, pinned tabs, favorites and Easels sync through
   a private app folder in your Drive. Open tabs, history and logins stay local.
 - Also: tabs restore on relaunch with their history (pages load when first
@@ -44,7 +53,7 @@ of Malaysia's east coast. Built natively with Swift, AppKit and WKWebView.
 | ⇧⌘2 | Clip part of the page to an Easel |
 | ⌥⌘N | New Little Wau window |
 | ⌘F, ⌘G, ⇧⌘G | Find in page, next, previous |
-| ⌘+ / ⌘- / ⌘0 | Zoom in / out / actual size |
+| ⌘+ / ⌘- / ⌘0 | Zoom the page or Easel in / out / actual size |
 | ⇧⌘C | Copy page link |
 | ⌘, | Settings |
 

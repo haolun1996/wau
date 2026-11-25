@@ -308,6 +308,29 @@ struct EaselStoreTests {
         return (EaselStore(database: try AppDatabase.inMemory(), images: ImageStore(directory: directory)), directory)
     }
 
+    @Test func easelsKeepTheOrderTheyAreDraggedInto() throws {
+        let (store, directory) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let space = UUID()
+        let a = store.createEasel(in: space, title: "A")
+        let b = store.createEasel(in: space, title: "B")
+        let c = store.createEasel(in: space, title: "C")
+        let other = store.createEasel(in: UUID(), title: "Elsewhere")
+        func titles() -> [String] { store.easels(in: space).map(\.title) }
+        #expect(titles() == ["A", "B", "C"])
+
+        store.move(c.id, toGap: 0)
+        #expect(titles() == ["C", "A", "B"])
+        store.move(c.id, toGap: 3) // the gap after B
+        #expect(titles() == ["A", "B", "C"])
+        store.move(a.id, toGap: 2) // between B and C
+        #expect(titles() == ["B", "A", "C"])
+        store.move(b.id, toGap: 1) // its own place: nothing changes
+        #expect(titles() == ["B", "A", "C"])
+        #expect(store.easels(in: other.spaceID).map(\.title) == ["Elsewhere"])
+        _ = (a, b)
+    }
+
     @Test func itemsStackInFrontAndImagesAreScaled() throws {
         let (store, directory) = try makeStore()
         defer { try? FileManager.default.removeItem(at: directory) }

@@ -47,6 +47,7 @@ extension BrowserWindowController {
             self?.hideEasel()
             self?.model.open(url: url)
         }
+        easelCanvas.onCapture = { [weak self] easelID in self?.startCapture(into: easelID) }
     }
 
     // MARK: Actions
@@ -59,7 +60,17 @@ extension BrowserWindowController {
 
     /// ⇧⌘2: drag a box over the page to clip it onto an Easel.
     @objc func captureToEasel(_ sender: Any?) {
-        guard captureOverlay == nil, !model.visibleTabs.isEmpty else { NSSound.beep(); return }
+        startCapture(into: nil)
+    }
+
+    /// Shows the page with a box to drag over it. With `target`, the clipping
+    /// goes onto that Easel, which comes back when done; otherwise the user
+    /// picks an Easel if there are several.
+    func startCapture(into target: UUID?) {
+        guard captureOverlay == nil, !model.visibleTabs.isEmpty else {
+            if target != nil { showToast("Open a page in a tab first, then clip part of it") } else { NSSound.beep() }
+            return
+        }
         hideEasel()
         dismissCommandBar()
         let overlay = CaptureOverlayView()
@@ -75,24 +86,34 @@ extension BrowserWindowController {
             guard let self, let overlay else { return }
             captureOverlay = nil
             defer { overlay.removeFromSuperview() }
-            guard let rect else { return }
-            clip(rect, from: overlay)
+            guard let rect else {
+                if let target { showEasel(target) }
+                return
+            }
+            clip(rect, from: overlay, into: target)
         }
         captureOverlay = overlay
         window?.makeFirstResponder(overlay)
     }
 
     /// Snapshots the part of the page under `rect` and puts it on an Easel.
-    private func clip(_ rect: NSRect, from overlay: NSView) {
+    private func clip(_ rect: NSRect, from overlay: NSView, into target: UUID?) {
         let center = NSPoint(x: rect.midX, y: rect.midY)
         // The pane under the middle of the box is the one being clipped.
         guard let tab = model.visibleTabs.first(where: { tab in
             let frame = tab.webView.convert(tab.webView.bounds, to: overlay)
             return frame.contains(center)
-        }) else { NSSound.beep(); return }
+        }) else {
+            NSSound.beep()
+            if let target { showEasel(target) }
+            return
+        }
         let webView = tab.webView
         let area = webView.convert(rect, from: overlay).intersection(webView.bounds)
-        guard !area.isEmpty else { return }
+        guard !area.isEmpty else {
+            if let target { showEasel(target) }
+            return
+        }
         let configuration = WKSnapshotConfiguration()
         configuration.rect = area
         let title = tab.title
@@ -101,6 +122,11 @@ extension BrowserWindowController {
             do {
                 let image = try await webView.takeSnapshot(configuration: configuration)
                 guard let png = image.pngData, let self else { return }
+                if let target {
+                    easels.addImage(png, to: target, caption: title, source: source)
+                    showEasel(target)
+                    return
+                }
                 chooseEasel { [weak self] easelID in
                     guard let self, easels.addImage(png, to: easelID, caption: title, source: source) != nil else { return }
                     showToast("Clipped to “\(easels.easel(withID: easelID)?.title ?? "Easel")”")
@@ -108,6 +134,7 @@ extension BrowserWindowController {
             } catch {
                 Self.logger.error("Clipping failed: \(error)")
                 NSSound.beep()
+                if let target { self?.showEasel(target) }
             }
         }
     }
@@ -149,6 +176,22 @@ extension BrowserWindowController {
         })
         let location = contentView.convert(window.mouseLocationOutsideOfEventStream, from: nil)
         menu.popUp(positioning: nil, at: location, in: contentView)
+    }
+
+    func rename(_ easel: Easel) {
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Rename Easel"
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(string: easel.title)
+        field.frame = NSRect(x: 0, y: 0, width: 260, height: 24)
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.easels.rename(easel.id, to: field.stringValue)
+        }
     }
 
     func confirmDelete(_ easel: Easel) {

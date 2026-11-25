@@ -32,8 +32,10 @@ final class EaselStore {
         }
     }
 
+    /// A Space's Easels in their sidebar order.
     func easels(in spaceID: UUID) -> [Easel] {
         snapshot.easels.filter { $0.spaceID == spaceID }
+            .sorted { ($0.position, $0.createdAt) < ($1.position, $1.createdAt) }
     }
 
     func easel(withID id: UUID) -> Easel? {
@@ -48,7 +50,9 @@ final class EaselStore {
 
     @discardableResult
     func createEasel(in spaceID: UUID, title: String = "Easel") -> Easel {
-        let easel = Easel(spaceID: spaceID, title: title)
+        // New Easels go to the end of the list.
+        let last = easels(in: spaceID).map(\.position).max() ?? 0
+        let easel = Easel(spaceID: spaceID, title: title, position: last + 1)
         snapshot.easels.append(easel)
         persist { try $0.saveEasel(easel) }
         onChange?()
@@ -61,6 +65,27 @@ final class EaselStore {
         snapshot.easels[index].title = title.isEmpty ? "Easel" : title
         let easel = snapshot.easels[index]
         persist { try $0.saveEasel(easel) }
+        onChange?()
+    }
+
+    /// Moves an Easel to `gap` among its Space's Easels (0 is the top), and
+    /// renumbers them so the order saves and syncs.
+    func move(_ id: UUID, toGap gap: Int) {
+        guard let moving = easel(withID: id) else { return }
+        var ordered = easels(in: moving.spaceID)
+        guard let from = ordered.firstIndex(where: { $0.id == id }) else { return }
+        ordered.remove(at: from)
+        // Gaps after the Easel's old place shift up by one once it's lifted out.
+        let target = min(max(gap > from ? gap - 1 : gap, 0), ordered.count)
+        ordered.insert(moving, at: target)
+        var changed: [Easel] = []
+        for (number, easel) in ordered.enumerated() where easel.position != number + 1 {
+            guard let index = snapshot.easels.firstIndex(where: { $0.id == easel.id }) else { continue }
+            snapshot.easels[index].position = number + 1
+            changed.append(snapshot.easels[index])
+        }
+        guard !changed.isEmpty else { return }
+        persist { database in try changed.forEach(database.saveEasel) }
         onChange?()
     }
 
@@ -143,11 +168,21 @@ final class EaselStore {
     }
 
     @discardableResult
-    func addText(_ text: String, to easelID: UUID, center: CGPoint? = nil) -> EaselItem {
+    func addText(_ text: String, to easelID: UUID, center: CGPoint? = nil, color: String? = nil) -> EaselItem {
         let origin = center.map { CGPoint(x: $0.x - 110, y: $0.y - 20) } ?? nextFreeSpot(in: easelID)
         return add(EaselItem(
             easelID: easelID, kind: .text,
-            x: max(0, origin.x), y: max(0, origin.y), width: 220, height: 40, text: text
+            x: max(0, origin.x), y: max(0, origin.y), width: 220, height: 40, text: text, color: color
+        ))
+    }
+
+    /// A circle, rectangle, arrow or stroke drawn on the canvas.
+    @discardableResult
+    func addShape(_ kind: EaselItemKind, frame: CGRect, points: [EaselPoint] = [], color: String? = nil, to easelID: UUID) -> EaselItem {
+        add(EaselItem(
+            easelID: easelID, kind: kind,
+            x: max(0, frame.minX), y: max(0, frame.minY), width: frame.width, height: frame.height,
+            points: points, color: color
         ))
     }
 
