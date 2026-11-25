@@ -1,0 +1,4 @@
+// Shared build settings. Machine-specific values (like the Google client ID)
+// go in Config/Local.xcconfig, which is not committed; see Local.xcconfig.example.
+WAU_GOOGLE_CLIENT_ID =
+#include? "Local.xcconfig"

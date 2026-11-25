@@ -1,0 +1,6 @@
+// Copy to Config/Local.xcconfig and fill in. That file is ignored by git.
+//
+// Google Drive sync needs an OAuth client of type "iOS" from Google Cloud
+// Console (APIs & Services ▸ Credentials), with the Google Drive API enabled.
+// Use the app's bundle ID (dev.wau.Wau) as the client's bundle ID.
+WAU_GOOGLE_CLIENT_ID = 1234567890-abcdefg.apps.googleusercontent.com
