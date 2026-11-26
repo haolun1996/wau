@@ -1,4 +1,5 @@
 import AppKit
+import WebKit
 import Core
 import Foundation
 import Storage
@@ -285,6 +286,103 @@ struct SplitViewTests {
         #expect(model.archiveStaleTabs().isEmpty)
     }
 
+    @Test func droppingATabOnThePageSplitsOnThatSide() {
+        let model = BrowserModel()
+        let a = model.open(url: nil)
+        let b = model.open(url: nil, select: false)
+        let c = model.open(url: nil, select: false)
+        model.select(a)
+        #expect(!model.canPlace(a, beside: a)) // a lone page can't split with itself
+        #expect(model.placeInSplit(b, beside: a, after: false))
+        #expect(model.visibleTabs.map(\.id) == [b.id, a.id])
+        #expect(model.selected === b)
+
+        #expect(model.placeInSplit(c, beside: a, after: true))
+        #expect(model.visibleTabs.map(\.id) == [b.id, a.id, c.id])
+        // Dragging a pane to the other end moves it.
+        #expect(model.placeInSplit(c, beside: b, after: false))
+        #expect(model.visibleTabs.map(\.id) == [c.id, b.id, a.id])
+        #expect(model.currentSpace.splits.count == 1)
+    }
+
+    @Test func droppingATabOnAnotherInTheSidebarSplitsThem() {
+        let model = BrowserModel()
+        let a = model.open(url: nil)
+        let b = model.open(url: nil, select: false)
+        let c = model.open(url: nil, select: false)
+        model.select(a)
+        // Neither b nor c is on screen; dropping b on c still splits them.
+        #expect(!model.canPlace(b, beside: c))
+        #expect(model.canJoin(b, beside: c))
+        #expect(model.placeInSplit(b, beside: c, after: false))
+        #expect(model.visibleTabs.map(\.id) == [b.id, c.id])
+        #expect(model.selected === b)
+        #expect(!model.canJoin(c, beside: c))
+    }
+
+    @Test func easelsJoinSplitsWithTabs() {
+        let model = BrowserModel()
+        let easel = UUID(), other = UUID()
+        var easels: Set<UUID> = [easel, other]
+        model.easelIDs = { _ in easels }
+        let a = model.open(url: nil)
+        let b = model.open(url: nil, select: false)
+        model.select(a)
+
+        // Two Easels alone don't make a split; an Easel with a tab does.
+        #expect(!model.canJoin(other, beside: easel))
+        #expect(model.placeInSplit(easel, beside: a.id, after: true))
+        #expect(model.visiblePanes.map(\.id) == [a.id, easel])
+        #expect(model.visibleTabs.map(\.id) == [a.id])
+        #expect(model.focusedPaneID == easel) // the dropped Easel has the focus
+        #expect(model.selected === a)
+
+        // Clicking the tab pane focuses it; the split stays on screen.
+        model.select(a)
+        #expect(model.focusedPaneID == a.id)
+        #expect(model.visiblePanes.count == 2)
+        #expect(model.focusEasel(easel))
+        #expect(model.focusedPaneID == easel)
+
+        // Picking another tab leaves the split and the Easel's focus.
+        model.select(b)
+        #expect(model.focusedPaneID == b.id)
+        #expect(!model.focusEasel(other)) // not in a split
+        #expect(model.focusEasel(easel)) // brings the split back
+        #expect(model.selected === a)
+
+        // A deleted Easel leaves its split, which needs two panes.
+        easels.remove(easel)
+        model.easelsChanged()
+        #expect(model.currentSpace.splits.isEmpty)
+        #expect(model.focusedPaneID == a.id)
+    }
+
+    @Test func aSplitKeepsATabWhenItsTabsClose() {
+        let model = BrowserModel()
+        let e1 = UUID(), e2 = UUID()
+        model.easelIDs = { _ in [e1, e2] }
+        let a = model.open(url: nil)
+        _ = model.open(url: nil, select: false)
+        model.select(a)
+        model.placeInSplit(e1, beside: a.id, after: true)
+        model.placeInSplit(e2, beside: e1, after: true)
+        #expect(model.visiblePanes.count == 3)
+        model.close(a) // only Easels would be left
+        #expect(model.currentSpace.splits.isEmpty)
+    }
+
+    @Test func droppingIntoAFullSplitIsRefused() {
+        let model = BrowserModel()
+        let base = model.open(url: nil)
+        let others = (0..<4).map { _ in model.open(url: nil, select: false) }
+        model.select(base)
+        for tab in others.prefix(3) { model.placeInSplit(tab, beside: base, after: true) }
+        #expect(model.visibleTabs.count == 4)
+        #expect(!model.canPlace(others[3], beside: base))
+        #expect(model.canPlace(others[0], beside: base)) // rearranging still works
+    }
+
     @Test func favoritesAndOtherSpacesCantSplit() {
         let model = BrowserModel()
         let a = model.open(url: nil)
@@ -384,5 +482,56 @@ struct DownloadTests {
         let sneaky = DownloadManager.uniqueDestination(for: "../../etc/passwd", in: folder)
         #expect(sneaky.deletingLastPathComponent().standardizedFileURL == folder.standardizedFileURL)
         #expect(DownloadManager.uniqueDestination(for: "...", in: folder).lastPathComponent == "Download")
+    }
+}
+
+@MainActor
+@Suite("Dropping a tab on the page")
+struct WebContentDropTests {
+    func makeView(panes: Int, axis: SplitAxis = .horizontal) -> WebContentView {
+        let view = WebContentView()
+        view.frame = NSRect(x: 0, y: 0, width: 808, height: 600)
+        view.display((0..<panes).map { _ in WKWebView() }, axis: axis)
+        view.layoutSubtreeIfNeeded()
+        return view
+    }
+
+    @Test func aSinglePageSplitsLeftOrRight() throws {
+        let view = makeView(panes: 1)
+        let left = try #require(view.dropTarget(at: NSPoint(x: 100, y: 300)))
+        #expect(left.pane == 0 && !left.after)
+        #expect(left.zone.maxX <= 404 && left.zone.minX < 20)
+        let right = try #require(view.dropTarget(at: NSPoint(x: 700, y: 300)))
+        #expect(right.after)
+        #expect(right.zone.minX >= 404 && right.zone.maxX > 780)
+    }
+
+    @Test func aSplitTargetsTheHalfOfThePaneUnderThePointer() throws {
+        let view = makeView(panes: 2) // two 400pt panes with an 8pt gap
+        let target = try #require(view.dropTarget(at: NSPoint(x: 750, y: 300)))
+        #expect(target.pane == 1 && target.after)
+        let gap = try #require(view.dropTarget(at: NSPoint(x: 404, y: 300)))
+        #expect(gap.pane == 0 || gap.pane == 1) // the gap goes to a neighbour
+
+        let stacked = makeView(panes: 2, axis: .vertical)
+        let top = try #require(stacked.dropTarget(at: NSPoint(x: 400, y: 580)))
+        #expect(top.pane == 0 && !top.after)
+        #expect(top.zone.minY >= 450)
+    }
+
+    @Test func aNewSplitSharesThePageEvenly() throws {
+        // Going from one page to two used to squash the first pane to nothing.
+        let view = makeView(panes: 1)
+        let pages = [WKWebView(), WKWebView()]
+        view.display(pages, fractions: [0.5, 0.5])
+        view.layoutSubtreeIfNeeded()
+        for (page, minX) in zip(pages, [0.0, 408.0]) {
+            let frame = view.convert(page.bounds, from: page)
+            #expect(frame.minX == minX && frame.width == 400)
+        }
+    }
+
+    @Test func noPagesNoDrop() {
+        #expect(makeView(panes: 0).dropTarget(at: NSPoint(x: 10, y: 10)) == nil)
     }
 }

@@ -132,6 +132,11 @@ final class EaselCanvasView: NSView {
         document.reload()
     }
 
+    /// Takes keyboard focus, for tool shortcuts and deleting items.
+    func focusCanvas() {
+        window?.makeFirstResponder(document)
+    }
+
     // MARK: Toolbar
 
     /// Puts pictures chosen in an Open panel on the canvas.

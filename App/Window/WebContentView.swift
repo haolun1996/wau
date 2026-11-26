@@ -2,9 +2,14 @@ import AppKit
 import Core
 import WebKit
 
-/// The page area: one rounded card per visible tab. A single tab fills it;
-/// a split shows two to four cards with draggable gaps between them, and the
-/// focused one outlined.
+extension NSPasteboard.PasteboardType {
+    /// A tab dragged out of the sidebar; the value is its ID.
+    static let wauTab = NSPasteboard.PasteboardType("dev.wau.tab")
+}
+
+/// The page area: one rounded card per pane on screen (a page, or an Easel
+/// in a split). A single tab fills it; a split shows two to four cards with
+/// draggable gaps between them, and the focused one outlined.
 @MainActor
 final class WebContentView: NSView, NSSplitViewDelegate {
     static let cornerRadius: CGFloat = 8
@@ -18,6 +23,11 @@ final class WebContentView: NSView, NSSplitViewDelegate {
     var onFocusPane: ((Int) -> Void)?
     /// The user dragged a divider; the new share of each pane.
     var onFractionsChanged: (([Double]) -> Void)?
+    /// A sidebar tab is dragged over the pane at this index: may it go
+    /// before it (false) or after it (true)?
+    var canDropTab: ((UUID, Int, Bool) -> Bool)?
+    /// The tab was dropped beside that pane.
+    var onDropTab: ((UUID, Int, Bool) -> Bool)?
 
     private let splitView = PaneSplitView()
     private let placeholder = NSTextField(labelWithString: "Press ⌘T to open a tab")
@@ -25,6 +35,8 @@ final class WebContentView: NSView, NSSplitViewDelegate {
     private var pendingFractions: [Double]?
     private var isUserDragging = false
     private var clickMonitor: Any?
+    private let dropHighlight = DropHighlightView()
+    private lazy var dropCatcher = DropCatcherView(owner: self)
 
     init() {
         super.init(frame: .zero)
@@ -35,6 +47,10 @@ final class WebContentView: NSView, NSSplitViewDelegate {
         placeholder.textColor = .tertiaryLabelColor
         placeholder.font = .systemFont(ofSize: 15, weight: .medium)
         addSubview(placeholder)
+        dropCatcher.isHidden = true
+        addSubview(dropCatcher) // above the pages
+        dropHighlight.isHidden = true
+        addSubview(dropHighlight)
         NSLayoutConstraint.activate([
             splitView.leadingAnchor.constraint(equalTo: leadingAnchor),
             splitView.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -42,28 +58,33 @@ final class WebContentView: NSView, NSSplitViewDelegate {
             splitView.bottomAnchor.constraint(equalTo: bottomAnchor),
             placeholder.centerXAnchor.constraint(equalTo: centerXAnchor),
             placeholder.centerYAnchor.constraint(equalTo: centerYAnchor),
+            dropCatcher.leadingAnchor.constraint(equalTo: leadingAnchor),
+            dropCatcher.trailingAnchor.constraint(equalTo: trailingAnchor),
+            dropCatcher.topAnchor.constraint(equalTo: topAnchor),
+            dropCatcher.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-    /// Shows `webViews` as panes along `axis`, sized by `fractions`, with
-    /// the pane at `focused` outlined when there is more than one.
-    func display(_ webViews: [WKWebView], focused: Int = 0, axis: SplitAxis = .horizontal, fractions: [Double] = []) {
-        let sameViews = panes.map(\.webView).elementsEqual(webViews, by: ===)
+    /// Shows `views` (pages or Easels) as panes along `axis`, sized by
+    /// `fractions`, with the pane at `focused` outlined when there is more
+    /// than one.
+    func display(_ views: [NSView], focused: Int = 0, axis: SplitAxis = .horizontal, fractions: [Double] = []) {
+        let sameViews = panes.map(\.content).elementsEqual(views, by: ===)
         let vertical = axis == .horizontal // NSSplitView's "vertical" means vertical dividers
         if !sameViews || splitView.isVertical != vertical {
             panes.forEach { $0.detach() }
             splitView.arrangedSubviews.forEach { $0.removeFromSuperview() }
             splitView.isVertical = vertical
-            panes = webViews.map { webView in
-                let pane = PaneView(webView: webView)
+            panes = views.map { view in
+                let pane = PaneView(content: view)
                 pane.accent = progressColor
                 splitView.addArrangedSubview(pane)
                 return pane
             }
-            pendingFractions = fractions.count == webViews.count ? fractions : nil
+            pendingFractions = fractions.count == views.count ? fractions : nil
             needsLayout = true
         } else if fractions.count == panes.count, !isUserDragging, fractions != currentFractions() {
             pendingFractions = fractions
@@ -72,20 +93,28 @@ final class WebContentView: NSView, NSSplitViewDelegate {
         for (index, pane) in panes.enumerated() {
             pane.isFocused = panes.count > 1 && index == focused
         }
-        placeholder.isHidden = !webViews.isEmpty
+        placeholder.isHidden = !views.isEmpty
     }
 
     override func layout() {
         super.layout()
         guard let fractions = pendingFractions, fractions.count == panes.count, panes.count > 1 else { return }
         pendingFractions = nil
-        let length = (splitView.isVertical ? splitView.bounds.width : splitView.bounds.height)
-            - splitView.dividerThickness * CGFloat(panes.count - 1)
+        // Size the panes directly. Moving dividers instead goes wrong for new
+        // panes: they start with no size, so every position is out of range.
+        let sideBySide = splitView.isVertical
+        let bounds = splitView.bounds
+        let thickness = splitView.dividerThickness
+        let total = sideBySide ? bounds.width : bounds.height
+        let length = total - thickness * CGFloat(panes.count - 1)
         guard length > 0 else { return }
-        var position: CGFloat = 0
-        for (index, fraction) in fractions.dropLast().enumerated() {
-            position += length * fraction
-            splitView.setPosition(position + splitView.dividerThickness * CGFloat(index), ofDividerAt: index)
+        var offset: CGFloat = 0
+        for (index, pane) in panes.enumerated() {
+            let size = index == panes.count - 1 ? total - offset : (length * fractions[index]).rounded()
+            pane.frame = sideBySide
+                ? NSRect(x: offset, y: 0, width: size, height: bounds.height)
+                : NSRect(x: 0, y: offset, width: bounds.width, height: size) // the split view is flipped
+            offset += size + thickness
         }
     }
 
@@ -116,6 +145,101 @@ final class WebContentView: NSView, NSSplitViewDelegate {
         }
     }
 
+    // MARK: Drop a sidebar tab to split
+
+    /// A tab is being dragged out of the sidebar. A page claims every drag
+    /// that passes over it, whatever it carries, so while this is on a clear
+    /// view covers the pages and takes the drag instead.
+    var isTabDragActive = false {
+        didSet {
+            dropCatcher.isHidden = !isTabDragActive
+            if !isTabDragActive { showDropZone(nil) }
+        }
+    }
+
+    /// Where a dragged tab would land: beside which pane, on which side, and
+    /// the half of that pane to light up. Side by side (or a single page)
+    /// uses left and right; a stacked split uses top and bottom.
+    func dropTarget(at point: NSPoint) -> (pane: Int, after: Bool, zone: NSRect)? {
+        let frames = panes.map { convert($0.bounds, from: $0) }
+        guard !frames.isEmpty else { return nil }
+        // Over a gap, the nearest pane.
+        let index = frames.indices.min { distance(from: point, to: frames[$0]) < distance(from: point, to: frames[$1]) }!
+        let frame = frames[index]
+        var zone = frame
+        let after: Bool
+        if panes.count < 2 || splitView.isVertical {
+            after = point.x >= frame.midX
+            zone.size.width = frame.width / 2
+            if after { zone.origin.x = frame.midX }
+        } else {
+            after = point.y < frame.midY // this view isn't flipped: lower is later
+            zone.size.height = frame.height / 2
+            if !after { zone.origin.y = frame.midY }
+        }
+        return (index, after, zone.insetBy(dx: 6, dy: 6))
+    }
+
+    private func distance(from point: NSPoint, to rect: NSRect) -> CGFloat {
+        let dx = max(rect.minX - point.x, 0, point.x - rect.maxX)
+        let dy = max(rect.minY - point.y, 0, point.y - rect.maxY)
+        return hypot(dx, dy)
+    }
+
+    private func draggedTab(_ info: any NSDraggingInfo) -> UUID? {
+        info.draggingPasteboard.string(forType: .wauTab).flatMap(UUID.init(uuidString:))
+    }
+
+    /// Lights up where the tab would go; nil hides the highlight.
+    func showDropZone(_ zone: NSRect?) {
+        guard let zone else {
+            dropHighlight.isHidden = true
+            return
+        }
+        let wasHidden = dropHighlight.isHidden
+        dropHighlight.isHidden = false
+        if wasHidden {
+            dropHighlight.frame = zone
+        } else if dropHighlight.frame != zone {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.15
+                dropHighlight.animator().frame = zone
+            }
+        }
+    }
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        return draggingUpdated(sender)
+    }
+
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        guard let tab = draggedTab(sender),
+              let target = dropTarget(at: convert(sender.draggingLocation, from: nil)),
+              canDropTab?(tab, target.pane, target.after) == true
+        else {
+            showDropZone(nil)
+            return []
+        }
+        showDropZone(target.zone)
+        return .move
+    }
+
+    override func draggingExited(_ sender: (any NSDraggingInfo)?) {
+        showDropZone(nil)
+    }
+
+    override func draggingEnded(_ sender: any NSDraggingInfo) {
+        showDropZone(nil)
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        showDropZone(nil)
+        guard let tab = draggedTab(sender),
+              let target = dropTarget(at: convert(sender.draggingLocation, from: nil))
+        else { return false }
+        return onDropTab?(tab, target.pane, target.after) ?? false
+    }
+
     // MARK: NSSplitViewDelegate
 
     func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposed: CGFloat, ofSubviewAt index: Int) -> CGFloat {
@@ -141,9 +265,79 @@ private final class PaneSplitView: NSSplitView {
     override func drawDivider(in rect: NSRect) {}
 }
 
-/// One pane: a shadowed, rounded card holding a page and its loading bar.
+/// A clear cover over the pages during a sidebar tab drag. It passes the
+/// drag to the page area, which works out where the tab would go.
+private final class DropCatcherView: NSView {
+    private weak var owner: WebContentView?
+
+    init(owner: WebContentView) {
+        self.owner = owner
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        registerForDraggedTypes([.wauTab])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        owner?.draggingEntered(sender) ?? []
+    }
+
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        owner?.draggingUpdated(sender) ?? []
+    }
+
+    override func draggingExited(_ sender: (any NSDraggingInfo)?) {
+        owner?.draggingExited(sender)
+    }
+
+    override func draggingEnded(_ sender: any NSDraggingInfo) {
+        owner?.draggingEnded(sender)
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        owner?.performDragOperation(sender) ?? false
+    }
+}
+
+/// Where a dragged tab would go to make a split: half of a page, or half
+/// of a sidebar row. Always light blue, the usual colour for "drop here",
+/// whatever the Space's theme.
+final class DropHighlightView: NSView {
+    static let color = NSColor(srgbRed: 0.45, green: 0.76, blue: 1, alpha: 1)
+
+    private let fillAlpha: CGFloat
+    private let borderColor: NSColor
+
+    /// A stronger fill and a white outline show up over a selected sidebar
+    /// row, which macOS turns bright blue during a drag.
+    init(cornerRadius: CGFloat = WebContentView.cornerRadius, fillAlpha: CGFloat = 0.22, borderColor: NSColor = DropHighlightView.color) {
+        self.fillAlpha = fillAlpha
+        self.borderColor = borderColor
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = cornerRadius
+        layer?.cornerCurve = .continuous
+        layer?.borderWidth = 2
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override var wantsUpdateLayer: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func updateLayer() {
+        layer?.backgroundColor = Self.color.withAlphaComponent(fillAlpha).cgColor
+        layer?.borderColor = borderColor.cgColor
+    }
+}
+
+/// One pane: a shadowed, rounded card holding a page and its loading bar,
+/// or an Easel.
 private final class PaneView: NSView {
-    let webView: WKWebView
+    let content: NSView
     var accent: NSColor = .controlAccentColor {
         didSet {
             progressBar.color = accent
@@ -158,8 +352,8 @@ private final class PaneView: NSView {
     private let progressBar = ProgressBar()
     private var observations: [NSKeyValueObservation] = []
 
-    init(webView: WKWebView) {
-        self.webView = webView
+    init(content: NSView) {
+        self.content = content
         super.init(frame: .zero)
         wantsLayer = true
         layer?.masksToBounds = false
@@ -168,27 +362,28 @@ private final class PaneView: NSView {
         layer?.shadowRadius = 5
         layer?.shadowOffset = CGSize(width: 0, height: -1)
 
-        for view in [card, webView, progressBar] as [NSView] {
+        for view in [card, content, progressBar] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
         }
         addSubview(card)
-        card.addSubview(webView)
+        card.addSubview(content)
         card.addSubview(progressBar) // above the page
         NSLayoutConstraint.activate([
             card.leadingAnchor.constraint(equalTo: leadingAnchor),
             card.trailingAnchor.constraint(equalTo: trailingAnchor),
             card.topAnchor.constraint(equalTo: topAnchor),
             card.bottomAnchor.constraint(equalTo: bottomAnchor),
-            webView.leadingAnchor.constraint(equalTo: card.leadingAnchor),
-            webView.trailingAnchor.constraint(equalTo: card.trailingAnchor),
-            webView.topAnchor.constraint(equalTo: card.topAnchor),
-            webView.bottomAnchor.constraint(equalTo: card.bottomAnchor),
+            content.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            content.topAnchor.constraint(equalTo: card.topAnchor),
+            content.bottomAnchor.constraint(equalTo: card.bottomAnchor),
             progressBar.leadingAnchor.constraint(equalTo: card.leadingAnchor),
             progressBar.trailingAnchor.constraint(equalTo: card.trailingAnchor),
             progressBar.topAnchor.constraint(equalTo: card.topAnchor),
             progressBar.heightAnchor.constraint(equalToConstant: 2.5),
         ])
 
+        guard let webView = content as? WKWebView else { return } // an Easel: no loading bar
         progressBar.reset(loading: webView.isLoading, progress: webView.estimatedProgress)
         let update: @Sendable (WKWebView) -> Void = { [weak self] webView in
             MainActor.assumeIsolated {
@@ -204,11 +399,11 @@ private final class PaneView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-    /// Releases the page so it can be shown somewhere else.
+    /// Releases the page or Easel so it can be shown somewhere else.
     func detach() {
         observations.forEach { $0.invalidate() }
         observations = []
-        webView.removeFromSuperview()
+        content.removeFromSuperview()
     }
 
     override func layout() {

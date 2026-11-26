@@ -19,7 +19,13 @@ of Malaysia's east coast. Built natively with Swift, AppKit and WKWebView.
   day, week, month, or never, per Space) are archived. Bring them back from the
   command bar or History ▸ Archived Tabs, with their history.
 - **Split View**: 2–4 tabs side by side or stacked (⌃⇧=, right-click ▸ Open
-  in Split View). Click a pane to focus it; drag the gaps to resize.
+  in Split View, or drag a tab from the sidebar onto the left or right half
+  of the page, or onto the left or right half of another tab in the sidebar).
+  Click a pane to focus it; drag the gaps to resize. In the
+  sidebar a split is one row with a segment per pane: click a segment to
+  focus that pane, or drag it out into the list to take it out of the split.
+  Easels can join a split too: drag one beside a tab, on the page or in the
+  sidebar (a split always keeps at least one tab).
 - **Little Wau**: a compact window for quick looks (⌥⌘N) and for links
   from other apps when Wau is your default browser. ⌘O moves the page into the main window.
 - **Easels**: canvases for clippings, page links, text, shapes and

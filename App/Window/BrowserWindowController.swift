@@ -34,6 +34,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     let easelCanvas: EaselCanvasView
     /// The Easel shown in the page area instead of tabs, if any.
     var shownEaselID: UUID?
+    /// Canvases for Easels shown as panes of a split, by Easel.
+    var paneCanvases: [UUID: EaselCanvasView] = [:]
     var captureOverlay: CaptureOverlayView?
     var findBar: FindBarView?
     private var titlebarDoubleClick: TitlebarDoubleClick?
@@ -77,6 +79,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         super.init(window: window)
 
         window.delegate = self
+        model.easelIDs = { [easels] spaceID in Set(easels.easels(in: spaceID).map(\.id)) }
         buildLayout(in: window)
         bindModel()
         bindEasels()
@@ -211,8 +214,21 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         sidebar.onTabChosen = { [weak self] in self?.hideEasel() }
         content.onFocusPane = { [weak self] index in
             guard let self else { return }
-            let panes = model.visibleTabs
-            if panes.indices.contains(index) { model.select(panes[index]) }
+            let panes = model.visiblePanes
+            guard panes.indices.contains(index) else { return }
+            switch panes[index] {
+            case .tab(let tab): model.select(tab)
+            case .easel(let id): model.focusEasel(id)
+            }
+        }
+        sidebar.onTabDrag = { [weak self] dragging in self?.content.isTabDragActive = dragging }
+        content.canDropTab = { [weak self] id, pane, _ in
+            guard let self, let target = paneID(at: pane) else { return false }
+            return model.canPlace(id, beside: target)
+        }
+        content.onDropTab = { [weak self] id, pane, after in
+            guard let self, let target = paneID(at: pane) else { return false }
+            return model.placeInSplit(id, beside: target, after: after)
         }
         content.onFractionsChanged = { [weak self] fractions in
             guard let self, let group = model.visibleSplit else { return }
@@ -232,6 +248,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     }
 
     /// Clamped so the sidebar stays usable and the page keeps some room.
+    /// The tab or Easel shown in the pane at `index`.
+    private func paneID(at index: Int) -> UUID? {
+        let panes = model.visiblePanes
+        return panes.indices.contains(index) ? panes[index].id : nil
+    }
+
     private func setSidebarWidth(_ width: CGFloat) {
         let windowWidth = window?.frame.width ?? .greatestFiniteMagnitude
         let upper = max(Self.sidebarWidthRange.lowerBound, min(Self.sidebarWidthRange.upperBound, windowWidth - Self.minimumPageWidth))
@@ -271,26 +293,62 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
             || shownEaselID.flatMap({ easels.easel(withID: $0)?.spaceID }) != model.currentSpaceID {
             if shownEaselID != nil { hideEasel() }
         }
+        // An Easel that joined a split shows as its pane instead.
+        if let shown = shownEaselID, model.split(containing: shown) != nil { hideEasel() }
         lastSelectedTabID = selectedID
         sidebar.reloadTabs()
         if backdrop.theme != model.currentSpace.theme {
             applyTheme(model.currentSpace.theme)
         }
         let selected = model.selected
-        let visible = model.visibleTabs
-        visible.forEach { $0.activateIfNeeded() }
+        let panes = model.visiblePanes
         let split = model.visibleSplit
         content.display(
-            visible.map(\.webView),
-            focused: visible.firstIndex { $0 === selected } ?? 0,
+            panes.map(view(for:)),
+            focused: panes.firstIndex { $0.id == model.focusedPaneID } ?? 0,
             axis: split?.axis ?? .horizontal,
             fractions: split?.fractions ?? []
         )
+        // Canvases for Easels no longer in a split on screen can go.
+        let shownEasels = Set(panes.compactMap { if case .easel(let id) = $0 { id } else { nil } })
+        paneCanvases = paneCanvases.filter { shownEasels.contains($0.key) }
         if shownEaselID != nil { return }
+        if let canvas = focusedPaneCanvas {
+            window?.title = canvas.easelID.flatMap { easels.easel(withID: $0)?.title } ?? "Easel"
+            if commandBar == nil, captureOverlay == nil { canvas.focusCanvas() }
+            return
+        }
         window?.title = selected?.title ?? model.currentSpace.name
         if commandBar == nil, captureOverlay == nil, let webView = selected?.webView {
             window?.makeFirstResponder(webView)
         }
+    }
+
+    /// The view for a pane: a tab's page, or a canvas for an Easel.
+    private func view(for pane: SplitPane) -> NSView {
+        switch pane {
+        case .tab(let tab):
+            tab.activateIfNeeded()
+            return tab.webView
+        case .easel(let id):
+            if let canvas = paneCanvases[id] { return canvas }
+            let canvas = makeEaselCanvas()
+            if let easel = easels.easel(withID: id) { canvas.show(easel) }
+            paneCanvases[id] = canvas
+            return canvas
+        }
+    }
+
+    /// The canvas of the focused pane, when that's an Easel in a split.
+    var focusedPaneCanvas: EaselCanvasView? {
+        guard shownEaselID == nil, let id = model.currentSpace.focusedEaselID else { return nil }
+        return paneCanvases[id]
+    }
+
+    /// The canvas the zoom commands act on: the Easel shown on its own, or
+    /// the focused Easel pane.
+    var activeEaselCanvas: EaselCanvasView? {
+        shownEaselID != nil ? easelCanvas : focusedPaneCanvas
     }
 
     // MARK: Actions (reached through the responder chain from menus and buttons)
@@ -314,6 +372,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     @objc func closeTab(_ sender: Any?) {
         if commandBar != nil {
             dismissCommandBar()
+        } else if let easel = focusedPaneCanvas?.easelID {
+            // A focused Easel pane leaves the split; the Easel itself stays.
+            model.removeFromSplit(paneID: easel)
         } else if let tab = model.selected {
             model.close(tab)
         } else {
@@ -336,8 +397,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @objc func removeFromSplitView(_ sender: Any?) {
-        guard let selected = model.selected, model.visibleSplit != nil else { NSSound.beep(); return }
-        model.removeFromSplit(selected)
+        guard let focused = model.focusedPaneID, model.visibleSplit != nil else { NSSound.beep(); return }
+        model.removeFromSplit(paneID: focused)
     }
 
     @objc func rotateSplitView(_ sender: Any?) {
@@ -487,10 +548,10 @@ extension BrowserWindowController: NSMenuItemValidation {
         case #selector(deleteSpace(_:)):
             return model.spaces.count > 1
         case #selector(findInPage(_:)), #selector(findNext(_:)), #selector(findPrevious(_:)):
-            return selected != nil && shownEaselID == nil
+            return selected != nil && activeEaselCanvas == nil
         case #selector(zoomInPage(_:)), #selector(zoomOutPage(_:)), #selector(actualSizePage(_:)):
             // On an Easel these zoom the canvas.
-            return selected != nil || shownEaselID != nil
+            return selected != nil || activeEaselCanvas != nil
         case #selector(selectTabNumber(_:)):
             return !(model.currentSpace.pinned + model.currentSpace.tabs).isEmpty
         case #selector(captureToEasel(_:)):

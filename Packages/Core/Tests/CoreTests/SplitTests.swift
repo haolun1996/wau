@@ -17,6 +17,28 @@ struct SplitGroupTests {
         #expect(!again) // already there
     }
 
+    @Test func placingAddsOrMovesBesideANeighbour() {
+        var group = SplitGroup(tabIDs: [a, b])
+        let r1 = group.place(c, beside: a, after: false)
+        #expect(r1)
+        #expect(group.tabIDs == [c, a, b])
+        let r2 = group.place(c, beside: b, after: true)
+        #expect(r2) // already a pane: moves
+        #expect(group.tabIDs == [a, b, c])
+        #expect(group.fractions.allSatisfy { abs($0 - 1.0 / 3) < 1e-9 })
+        let r3 = group.place(a, beside: a, after: true)
+        #expect(!r3)
+        let r4 = group.place(d, beside: e, after: true)
+        #expect(!r4) // neighbour isn't here
+        let r5 = group.place(d, beside: a, after: true)
+        #expect(r5)
+        let r6 = group.place(e, beside: a, after: true)
+        #expect(!r6) // full
+        let r7 = group.place(d, beside: c, after: true)
+        #expect(r7) // full, but moving is fine
+        #expect(group.tabIDs == [a, b, c, d])
+    }
+
     @Test func holdsAtMostFour() {
         var group = SplitGroup(tabIDs: [a, b, c, d, e])
         #expect(group.tabIDs == [a, b, c, d])
@@ -57,6 +79,15 @@ struct SplitGroupTests {
         let t2 = TabRecord(spaceID: space.id, url: URL(string: "https://b.example"), title: "b")
         let group = SplitGroup(tabIDs: [t1.id, t2.id])
         let snapshot = BrowserSnapshot(spaces: [space], tabs: [t1, t2], selectedSpaceID: space.id, splits: [space.id: [group]])
+        #expect(SyncMapping.apply(SyncMapping.fields(from: snapshot), to: snapshot).splits == [space.id: [group]])
+    }
+
+    @Test func syncApplyKeepsEaselsInSplits() {
+        let space = SpaceRecord.makeDefault()
+        let t1 = TabRecord(spaceID: space.id, url: URL(string: "https://a.example"), title: "a")
+        let easel = UUID() // not a tab: left for the app to check
+        let group = SplitGroup(tabIDs: [t1.id, easel])
+        let snapshot = BrowserSnapshot(spaces: [space], tabs: [t1], selectedSpaceID: space.id, splits: [space.id: [group]])
         #expect(SyncMapping.apply(SyncMapping.fields(from: snapshot), to: snapshot).splits == [space.id: [group]])
     }
 }

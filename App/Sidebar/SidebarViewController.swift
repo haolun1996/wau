@@ -2,9 +2,22 @@ import AppKit
 import Core
 
 private extension NSPasteboard.PasteboardType {
-    /// A tab row being dragged within the sidebar; the value is its row index.
+    /// A tab being dragged within the sidebar; the value is its ID.
     static let wauTabRow = NSPasteboard.PasteboardType("dev.wau.tab-row")
     static let wauEaselRow = NSPasteboard.PasteboardType("dev.wau.easel-row")
+}
+
+/// A pane of a split row in the sidebar: a tab, or an Easel.
+private enum SidebarMember {
+    case tab(Tab)
+    case easel(Easel)
+
+    var id: UUID {
+        switch self {
+        case .tab(let tab): tab.id
+        case .easel(let easel): easel.id
+        }
+    }
 }
 
 /// The left column, top to bottom: navigation buttons, address pill,
@@ -19,6 +32,8 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
     var onEditSpace: ((Space) -> Void)?
     var onDeleteSpace: ((Space) -> Void)?
     var onSplitWith: ((Tab) -> Void)?
+    /// A tab started (true) or stopped (false) being dragged out of the list.
+    var onTabDrag: ((Bool) -> Void)?
     /// The current Space's Easels, listed below its tabs.
     var easelsInSpace: (() -> [Easel])?
     /// The Easel shown in the page area, highlighted in the list.
@@ -37,18 +52,46 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         /// Easels sit in the tab list, after the tabs, and look like tabs.
         case easel(Easel)
         case regular(Tab)
+        /// A Split View group: one row, one segment per pane (tabs and Easels).
+        case split([SidebarMember])
 
         var tab: Tab? {
             switch self {
             case .pinned(let tab), .regular(let tab): tab
-            case .newTab, .easel: nil
+            case .newTab, .easel, .split: nil
             }
+        }
+
+        /// Every tab and Easel the row stands for.
+        var members: [SidebarMember] {
+            switch self {
+            case .pinned(let tab), .regular(let tab): [.tab(tab)]
+            case .easel(let easel): [.easel(easel)]
+            case .split(let members): members
+            case .newTab: []
+            }
+        }
+
+        /// Every tab the row stands for.
+        var tabs: [Tab] {
+            members.compactMap { if case .tab(let tab) = $0 { tab } else { nil } }
         }
     }
 
     private let model: BrowserModel
     private var rows: [Row] = []
-    private let tableView = NSTableView()
+    private let tableView = SidebarTableView()
+    /// Half of a row, lit while a tab is held over it to make a split.
+    private let rowDropHighlight = DropHighlightView(cornerRadius: 7, fillAlpha: 0.7, borderColor: .white)
+    /// Where a drag over the list would drop: onto a row, to split with
+    /// it, or into a gap between rows.
+    private enum PendingDrop {
+        case split(row: Int)
+        case gap(Int)
+    }
+    private var pendingDrop: PendingDrop?
+    /// The line between rows where a dragged tab would land.
+    private let insertionLine = NSView()
     private let addressLabel = NSTextField(labelWithString: "")
     private let favoritesView = FavoritesView()
     private let spaceTitle = NSTextField(labelWithString: "")
@@ -112,8 +155,18 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         tableView.action = #selector(tableClicked)
         tableView.registerForDraggedTypes([.wauTabRow, .wauEaselRow])
         tableView.setDraggingSourceOperationMask(.move, forLocal: true)
-        // Other rows slide apart to show where the tab will land.
-        tableView.draggingDestinationFeedbackStyle = .gap
+        // The sidebar draws where a drop goes itself (see `updateDrop`).
+        tableView.draggingDestinationFeedbackStyle = .none
+        rowDropHighlight.isHidden = true
+        tableView.addSubview(rowDropHighlight)
+        insertionLine.isHidden = true
+        insertionLine.wantsLayer = true
+        insertionLine.layer?.cornerRadius = 1
+        insertionLine.layer?.backgroundColor = DropHighlightView.color.cgColor
+        tableView.addSubview(insertionLine)
+        tableView.onDragUpdate = { [weak self] info in self?.updateDrop(info) ?? [] }
+        tableView.onDrop = { [weak self] info in self?.performDrop(info) ?? false }
+        tableView.onDragExit = { [weak self] in self?.clearDrop() }
         let rowMenu = NSMenu()
         rowMenu.delegate = self
         tableView.menu = rowMenu
@@ -171,8 +224,26 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
     /// Rebuilds everything from the model.
     func reloadTabs() {
         let space = model.currentSpace
-        rows = space.pinned.map(Row.pinned) + [.newTab] + space.tabs.map(Row.regular)
-            + (easelsInSpace?() ?? []).map(Row.easel)
+        // A split shows as one row, where its first tab would be; Easels in
+        // it leave the Easel list.
+        let spaceTabs = space.pinned + space.tabs
+        let spaceEasels = easelsInSpace?() ?? []
+        var shownSplits = Set<UUID>()
+        func row(for tab: Tab, pinned: Bool) -> Row? {
+            guard let group = space.splits.first(where: { $0.contains(tab.id) }) else {
+                return pinned ? .pinned(tab) : .regular(tab)
+            }
+            guard shownSplits.insert(group.id).inserted else { return nil }
+            let members = group.tabIDs.compactMap { id -> SidebarMember? in
+                if let tab = spaceTabs.first(where: { $0.id == id }) { return .tab(tab) }
+                return spaceEasels.first { $0.id == id }.map(SidebarMember.easel)
+            }
+            return members.count >= 2 ? .split(members) : (pinned ? .pinned(tab) : .regular(tab))
+        }
+        rows = space.pinned.compactMap { row(for: $0, pinned: true) } + [.newTab]
+            + space.tabs.compactMap { row(for: $0, pinned: false) }
+        let splitEasels = Set(rows.flatMap(\.members).map(\.id))
+        rows += spaceEasels.filter { !splitEasels.contains($0.id) }.map(Row.easel)
         let shownEasel = shownEaselID?()
 
         isSyncingSelection = true
@@ -180,7 +251,7 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         tableView.reloadData()
         let selectedIndex = shownEasel != nil
             ? rows.firstIndex { if case .easel(let easel) = $0 { easel.id == shownEasel } else { false } }
-            : rows.firstIndex { $0.tab != nil && $0.tab?.id == space.selectedTabID }
+            : rows.firstIndex { $0.tabs.contains { $0.id == space.selectedTabID } }
         if let index = selectedIndex {
             tableView.selectRowIndexes([index], byExtendingSelection: false)
             tableView.scrollRowToVisible(index)
@@ -196,10 +267,14 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
 
     /// Updates one tab's row or favorite and, if selected, the navigation controls.
     func refresh(_ tab: Tab) {
-        if let index = rows.firstIndex(where: { $0.tab === tab }),
-           index < tableView.numberOfRows,
-           let cell = tableView.view(atColumn: 0, row: index, makeIfNecessary: false) as? TabCellView {
-            cell.configure(with: tab)
+        if let index = rows.firstIndex(where: { $0.tabs.contains { $0 === tab } }),
+           index < tableView.numberOfRows {
+            let cell = tableView.view(atColumn: 0, row: index, makeIfNecessary: false)
+            if let cell = cell as? TabCellView {
+                cell.configure(with: tab)
+            } else if let cell = cell as? SplitCellView {
+                cell.configure(with: rows[index].members, focusedID: model.focusedPaneID)
+            }
         }
         if model.isFavorite(tab) {
             favoritesView.show(model.favorites, selectedID: model.currentSpace.selectedTabID)
@@ -300,14 +375,20 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         menu.removeAllItems()
         let row = tableView.clickedRow
         guard rows.indices.contains(row) else { return }
-        if case .easel(let easel) = rows[row] {
+        let member = member(atRow: row, windowPoint: NSApp.currentEvent?.locationInWindow)
+        if case .easel(let easel) = member {
             menu.addItem(ClosureMenuItem("Open Easel") { [weak self] in self?.onSelectEasel?(easel) })
             menu.addItem(ClosureMenuItem("Rename Easel…") { [weak self] in self?.onRenameEasel?(easel) })
+            if model.split(containing: easel.id) != nil {
+                menu.addItem(ClosureMenuItem("Remove from Split View") { [weak self] in
+                    self?.model.removeFromSplit(paneID: easel.id)
+                })
+            }
             menu.addItem(.separator())
             menu.addItem(ClosureMenuItem("Delete Easel…") { [weak self] in self?.onDeleteEasel?(easel) })
             return
         }
-        guard let tab = rows[row].tab else { return }
+        guard case .tab(let tab) = member else { return }
         for item in self.menu(for: tab).items {
             item.menu?.removeItem(item)
             menu.addItem(item)
@@ -320,7 +401,44 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
 
     @objc private func tableClicked() {
         let row = tableView.clickedRow
-        if rows.indices.contains(row), case .newTab = rows[row] { onNewTab?() }
+        guard rows.indices.contains(row) else { return }
+        switch rows[row] {
+        case .newTab:
+            onNewTab?()
+        case .split:
+            // The row may already be selected; a click still picks a pane.
+            guard let member = member(atRow: row, windowPoint: NSApp.currentEvent?.locationInWindow),
+                  member.id != model.focusedPaneID
+            else { return }
+            choose(member)
+        default:
+            break
+        }
+    }
+
+    /// Shows a tab, or an Easel (in its split, if it's in one).
+    private func choose(_ member: SidebarMember) {
+        switch member {
+        case .tab(let tab):
+            onTabChosen?()
+            model.select(tab)
+        case .easel(let easel):
+            onSelectEasel?(easel)
+        }
+    }
+
+    /// The tab or Easel a row stands for at a point in the window: for a
+    /// split row, the pane under the point (or the focused pane, with no point).
+    private func member(atRow row: Int, windowPoint: NSPoint?) -> SidebarMember? {
+        guard rows.indices.contains(row) else { return nil }
+        guard case .split(let members) = rows[row] else { return rows[row].members.first }
+        let focused = members.first { $0.id == model.focusedPaneID } ?? members.first
+        guard let windowPoint,
+              let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? SplitCellView,
+              let index = cell.segmentIndex(at: cell.convert(windowPoint, from: nil)),
+              members.indices.contains(index)
+        else { return focused }
+        return members[index]
     }
 
     // MARK: Table
@@ -340,6 +458,17 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
             cell.configure(with: easel)
             cell.onClose = { [weak self] in self?.onDeleteEasel?(easel) }
             return cell
+        case .split(let members):
+            let cell = tableView.makeView(withIdentifier: SplitCellView.identifier, owner: nil) as? SplitCellView
+                ?? SplitCellView()
+            cell.configure(with: members, focusedID: model.focusedPaneID)
+            cell.onClose = { [weak self] member in
+                switch member {
+                case .tab(let tab): self?.model.close(tab)
+                case .easel(let easel): self?.model.removeFromSplit(paneID: easel.id) // keeps the Easel
+                }
+            }
+            return cell
         case .pinned, .regular:
             break
         }
@@ -347,7 +476,6 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         let cell = tableView.makeView(withIdentifier: TabCellView.identifier, owner: nil) as? TabCellView
             ?? TabCellView()
         cell.configure(with: tab)
-        cell.isInSplit = model.split(containing: tab) != nil
         cell.onClose = { [weak self, weak tab] in
             guard let self, let tab else { return }
             model.close(tab)
@@ -355,9 +483,13 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         return cell
     }
 
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        SidebarRowView()
+    }
+
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
         switch rows[row] {
-        case .pinned, .regular, .easel: true
+        case .pinned, .regular, .easel, .split: true
         case .newTab: false
         }
     }
@@ -366,28 +498,41 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         guard !isSyncingSelection else { return }
         let row = tableView.selectedRow
         guard rows.indices.contains(row) else { return }
-        if case .easel(let easel) = rows[row] {
-            onSelectEasel?(easel)
-            return
-        }
-        guard let tab = rows[row].tab else { return }
-        onTabChosen?()
-        model.select(tab)
+        let event = NSApp.currentEvent
+        let point = event?.type == .leftMouseDown ? event?.locationInWindow : nil
+        guard let member = member(atRow: row, windowPoint: point) else { return }
+        choose(member)
     }
 
     // MARK: Drag to reorder (and across "New Tab" to pin or unpin)
+
+    // While a tab or Easel is dragged, the page area takes it for Split View.
+    func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession, willBeginAt screenPoint: NSPoint, forRowIndexes rowIndexes: IndexSet) {
+        if rowIndexes.contains(where: { rows.indices.contains($0) && !rows[$0].members.isEmpty }) {
+            onTabDrag?(true)
+        }
+    }
+
+    func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        onTabDrag?(false)
+        clearDrop()
+    }
 
     // Every tab and Easel row can be dragged. Without this, pressing on an
     // Easel and moving would drag the selection across other rows instead,
     // switching away from the Easel.
     func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
         let item = NSPasteboardItem()
-        switch rows[row] {
-        case .pinned, .regular:
-            item.setString(String(row), forType: .wauTabRow)
+        // A split row drags the pane that was pressed.
+        switch member(atRow: row, windowPoint: NSApp.currentEvent?.locationInWindow) {
+        case .tab(let tab):
+            item.setString(tab.id.uuidString, forType: .wauTabRow)
+            // Lets the page area take it for Split View.
+            item.setString(tab.id.uuidString, forType: .wauTab)
         case .easel(let easel):
             item.setString(easel.id.uuidString, forType: .wauEaselRow)
-        case .newTab:
+            item.setString(easel.id.uuidString, forType: .wauTab)
+        case nil:
             return nil
         }
         return item
@@ -398,52 +543,152 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         rows.firstIndex { if case .easel = $0 { true } else { false } } ?? rows.count
     }
 
-    func tableView(
-        _ tableView: NSTableView,
-        validateDrop info: any NSDraggingInfo,
-        proposedRow row: Int,
-        proposedDropOperation dropOperation: NSTableView.DropOperation
-    ) -> NSDragOperation {
-        guard (info.draggingSource as? NSTableView) === tableView else { return [] }
-        let pasteboard = info.draggingPasteboard
-        // Dropping onto a row means "next to it"; tabs don't nest.
-        var gap = row
-        if pasteboard.availableType(from: [.wauEaselRow]) != nil {
+    /// Works out where a drag over the list would drop and shows it: over
+    /// the middle of a tab or Easel row, the half it would take beside it;
+    /// otherwise a line in the gap between rows.
+    private func updateDrop(_ info: any NSDraggingInfo) -> NSDragOperation {
+        guard (info.draggingSource as? NSTableView) === tableView else {
+            clearDrop()
+            return []
+        }
+        let point = tableView.convert(info.draggingLocation, from: nil)
+        let row = tableView.row(at: point)
+        if row >= 0 {
+            let middle = tableView.rect(ofRow: row).insetBy(dx: 0, dy: tableView.rect(ofRow: row).height / 4)
+            if middle.contains(point), let target = splitDropTarget(info, row: row) {
+                pendingDrop = .split(row: row)
+                insertionLine.isHidden = true
+                showRowDropZone(target.zone)
+                return .move
+            }
+        }
+        showRowDropZone(nil)
+        // The gap nearest the pointer (the table is flipped: y grows down).
+        var gap: Int
+        if row >= 0 {
+            gap = point.y < tableView.rect(ofRow: row).midY ? row : row + 1
+        } else {
+            gap = point.y < 0 ? 0 : rows.count
+        }
+        if info.draggingPasteboard.availableType(from: [.wauEaselRow]) != nil {
             // Easels stay among the Easels, below the tabs.
             gap = max(gap, firstEaselRow)
         } else {
             // Tabs stay above the Easels.
             gap = min(gap, firstEaselRow)
         }
-        tableView.setDropRow(gap, dropOperation: .above)
+        pendingDrop = .gap(gap)
+        showInsertionLine(atGap: gap)
         return .move
     }
 
-    func tableView(
-        _ tableView: NSTableView,
-        acceptDrop info: any NSDraggingInfo,
-        row: Int,
-        dropOperation: NSTableView.DropOperation
-    ) -> Bool {
+    private func performDrop(_ info: any NSDraggingInfo) -> Bool {
+        let drop = pendingDrop
+        clearDrop()
+        switch drop {
+        case .split(let row):
+            guard let target = splitDropTarget(info, row: row), let id = draggedPaneID(info) else { return false }
+            if case .tab = target.target { onTabChosen?() }
+            return model.placeInSplit(id, beside: target.target.id, after: target.after)
+        case .gap(let gap):
+            return dropInGap(info, gap: gap)
+        case nil:
+            return false
+        }
+    }
+
+    /// Moves the dragged tab or Easel to a gap between rows.
+    private func dropInGap(_ info: any NSDraggingInfo, gap row: Int) -> Bool {
         if let value = info.draggingPasteboard.pasteboardItems?.first?.string(forType: .wauEaselRow) {
             guard let id = UUID(uuidString: value),
-                  let easel = rows.lazy.compactMap({ if case .easel(let easel) = $0, easel.id == id { easel } else { nil } }).first
+                  let easel = (easelsInSpace?() ?? []).first(where: { $0.id == id })
             else { return false }
-            onMoveEasel?(easel, max(0, row - firstEaselRow))
+            let gap = max(0, row - firstEaselRow)
+            // Dropped among the Easels, an Easel leaves its split.
+            if model.split(containing: id) != nil { model.removeFromSplit(paneID: id) }
+            onMoveEasel?(easel, gap)
             return true
         }
-        guard let value = info.draggingPasteboard.pasteboardItems?.first?.string(forType: .wauTabRow),
-              let source = Int(value), rows.indices.contains(source), let tab = rows[source].tab
-        else { return false }
-        // Rows are [pinned…, New Tab, regular…]; gaps above New Tab are pinned.
-        let pinnedCount = model.currentSpace.pinned.count
-        if row <= pinnedCount {
-            model.moveTab(tab, to: .pinned, gap: row)
-        } else {
-            // validateDrop keeps tab drops above the Easels.
-            model.moveTab(tab, to: .regular, gap: min(row - pinnedCount - 1, model.currentSpace.tabs.count))
-        }
+        let space = model.currentSpace
+        guard let tab = draggedTab(info) else { return false }
+        // Rows are [pinned…, New Tab, regular…], and a split row stands for
+        // several tabs; count the tabs above the gap in the section it's in.
+        let newTabRow = rows.firstIndex { if case .newTab = $0 { true } else { false } } ?? 0
+        let above = Set(rows[..<min(row, rows.count)].flatMap(\.tabs).map(\.id))
+        let pinned = row <= newTabRow
+        let gap = (pinned ? space.pinned : space.tabs).filter { above.contains($0.id) }.count
+        // Dropped among the rows, a pane leaves its split.
+        if model.split(containing: tab) != nil { model.removeFromSplit(tab) }
+        model.moveTab(tab, to: pinned ? .pinned : .regular, gap: gap)
         return true
+    }
+
+    private func showInsertionLine(atGap gap: Int) {
+        guard !rows.isEmpty else { return }
+        let y = gap < rows.count
+            ? tableView.rect(ofRow: gap).minY
+            : tableView.rect(ofRow: rows.count - 1).maxY
+        insertionLine.frame = NSRect(x: 10, y: y - 1, width: tableView.bounds.width - 20, height: 2)
+        insertionLine.isHidden = false
+        tableView.addSubview(insertionLine, positioned: .above, relativeTo: nil)
+    }
+
+    private func clearDrop() {
+        pendingDrop = nil
+        rowDropHighlight.isHidden = true
+        insertionLine.isHidden = true
+    }
+
+    /// The tab or Easel being dragged.
+    private func draggedPaneID(_ info: any NSDraggingInfo) -> UUID? {
+        info.draggingPasteboard.pasteboardItems?.first?.string(forType: .wauTab).flatMap(UUID.init(uuidString:))
+    }
+
+    private func draggedTab(_ info: any NSDraggingInfo) -> Tab? {
+        let space = model.currentSpace
+        guard let value = info.draggingPasteboard.pasteboardItems?.first?.string(forType: .wauTabRow),
+              let id = UUID(uuidString: value)
+        else { return nil }
+        return (space.pinned + space.tabs).first { $0.id == id }
+    }
+
+    /// Dropping a dragged tab or Easel onto a tab or Easel row: what it
+    /// would join, on which side (by the half of the row, or of the split
+    /// segment, under the pointer), and that half in table coordinates.
+    private func splitDropTarget(_ info: any NSDraggingInfo, row: Int) -> (target: SidebarMember, after: Bool, zone: NSRect)? {
+        guard rows.indices.contains(row), let id = draggedPaneID(info),
+              let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false)
+        else { return nil }
+        let members = rows[row].members
+        let point = cell.convert(info.draggingLocation, from: nil)
+        var area = cell.bounds.insetBy(dx: 2, dy: 2)
+        let target: SidebarMember
+        if let split = cell as? SplitCellView {
+            guard let index = split.segmentIndex(at: point), members.indices.contains(index) else { return nil }
+            target = members[index]
+            area = split.segmentFrame(at: index)
+        } else if members.count == 1 {
+            target = members[0]
+        } else {
+            return nil
+        }
+        guard model.canJoin(id, beside: target.id) else { return nil }
+        let after = point.x >= area.midX
+        var zone = area
+        zone.size.width = area.width / 2
+        if after { zone.origin.x = area.midX }
+        return (target, after, tableView.convert(zone, from: cell))
+    }
+
+    private func showRowDropZone(_ zone: NSRect?) {
+        guard let zone else {
+            rowDropHighlight.isHidden = true
+            return
+        }
+        rowDropHighlight.frame = zone
+        rowDropHighlight.isHidden = false
+        // Keep it above the row views the table adds as it scrolls.
+        tableView.addSubview(rowDropHighlight, positioned: .above, relativeTo: nil)
     }
 
     @objc private func toggleSidebarClicked() {
@@ -478,6 +723,43 @@ final class ClosureMenuItem: NSMenuItem {
     required init(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
     @objc private func run() { handler() }
+}
+
+/// The tab list. Where a drag would drop is worked out by the sidebar on
+/// every move: the table's own drop handling asks only now and then, so the
+/// side of a row a tab would take could go stale.
+private final class SidebarTableView: NSTableView {
+    /// Shows where a drop would go; returns the operation it allows.
+    var onDragUpdate: ((any NSDraggingInfo) -> NSDragOperation)?
+    var onDrop: ((any NSDraggingInfo) -> Bool)?
+    var onDragExit: (() -> Void)?
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        onDragUpdate?(sender) ?? super.draggingEntered(sender)
+    }
+
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        onDragUpdate?(sender) ?? super.draggingUpdated(sender)
+    }
+
+    override func draggingExited(_ sender: (any NSDraggingInfo)?) {
+        onDragExit?()
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        onDrop?(sender) ?? super.performDragOperation(sender)
+    }
+}
+
+/// A list row that doesn't light up whole when a tab is held over it: the
+/// sidebar shows which half the tab would take instead.
+private final class SidebarRowView: NSTableRowView {
+    override var isTargetForDropOperation: Bool {
+        get { false }
+        set {}
+    }
+
+    override func drawDraggingDestinationFeedback(in dirtyRect: NSRect) {}
 }
 
 /// The rounded field at the top of the sidebar showing the current site.
@@ -523,11 +805,6 @@ private final class TabCellView: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("TabCell")
 
     var onClose: (() -> Void)?
-    /// Shows a small split badge for tabs that are part of a Split View.
-    var isInSplit = false {
-        didSet { splitBadge.isHidden = !isInSplit }
-    }
-    private let splitBadge = NSImageView(image: NSImage(systemSymbolName: "rectangle.split.2x1", accessibilityDescription: "In Split View")!)
     private let icon = NSImageView()
     private let spinner = NSProgressIndicator()
     private let title = NSTextField(labelWithString: "")
@@ -553,11 +830,7 @@ private final class TabCellView: NSTableCellView {
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
 
-        splitBadge.contentTintColor = .tertiaryLabelColor
-        splitBadge.symbolConfiguration = .init(pointSize: 10, weight: .regular)
-        splitBadge.isHidden = true
-
-        for view in [icon, spinner, title, splitBadge, closeButton] as [NSView] {
+        for view in [icon, spinner, title, closeButton] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
@@ -574,9 +847,7 @@ private final class TabCellView: NSTableCellView {
             spinner.heightAnchor.constraint(equalToConstant: 14),
             title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
             title.centerYAnchor.constraint(equalTo: centerYAnchor),
-            title.trailingAnchor.constraint(lessThanOrEqualTo: splitBadge.leadingAnchor, constant: -4),
-            splitBadge.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -2),
-            splitBadge.centerYAnchor.constraint(equalTo: centerYAnchor),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: closeButton.leadingAnchor, constant: -4),
             closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             closeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             closeButton.widthAnchor.constraint(equalToConstant: 18),
@@ -612,8 +883,170 @@ private final class TabCellView: NSTableCellView {
         icon.isHidden = false
         icon.image = NSImage(systemSymbolName: "rectangle.on.rectangle.angled", accessibilityDescription: "Easel")
         icon.contentTintColor = .secondaryLabelColor
-        isInSplit = false
         closeButton.toolTip = "Delete Easel…"
+    }
+
+    @objc private func closeClicked() {
+        onClose?()
+    }
+}
+
+/// A Split View group in the list: one segment per pane, side by side, the
+/// focused pane picked out. Hovering a segment shows its close button.
+private final class SplitCellView: NSTableCellView {
+    static let identifier = NSUserInterfaceItemIdentifier("SplitCell")
+
+    var onClose: ((SidebarMember) -> Void)?
+    private let stack = NSStackView()
+    private var segments: [SplitSegmentView] = []
+    private var tracking: NSTrackingArea?
+
+    init() {
+        super.init(frame: .zero)
+        identifier = Self.identifier
+        stack.orientation = .horizontal
+        stack.distribution = .fillEqually
+        stack.spacing = 2
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 1),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -1),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    func configure(with members: [SidebarMember], focusedID: UUID?) {
+        if segments.count != members.count {
+            segments.forEach { $0.removeFromSuperview() }
+            segments = members.map { _ in SplitSegmentView() }
+            segments.forEach { stack.addArrangedSubview($0) }
+        }
+        for (index, (segment, member)) in zip(segments, members).enumerated() {
+            segment.configure(with: member)
+            segment.isFocused = member.id == focusedID
+            segment.showsDivider = index > 0
+            segment.onClose = { [weak self] in self?.onClose?(member) }
+        }
+        updateHover(at: nil)
+    }
+
+    /// A segment's frame in this view.
+    func segmentFrame(at index: Int) -> NSRect {
+        convert(segments[index].bounds, from: segments[index])
+    }
+
+    /// Which segment is under a point in this view.
+    func segmentIndex(at point: NSPoint) -> Int? {
+        guard !segments.isEmpty, bounds.contains(point) else { return nil }
+        if let index = segments.firstIndex(where: { $0.frame.minX <= point.x && point.x < $0.frame.maxX }) {
+            return index
+        }
+        return point.x < bounds.midX ? 0 : segments.count - 1 // in a gap
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { updateHover(at: convert(event.locationInWindow, from: nil)) }
+    override func mouseMoved(with event: NSEvent) { updateHover(at: convert(event.locationInWindow, from: nil)) }
+    override func mouseExited(with event: NSEvent) { updateHover(at: nil) }
+
+    private func updateHover(at point: NSPoint?) {
+        let hovered = point.flatMap(segmentIndex(at:))
+        for (index, segment) in segments.enumerated() { segment.isHovered = index == hovered }
+    }
+}
+
+/// One pane of a split row: site icon, title, and a close button on hover.
+private final class SplitSegmentView: NSView {
+    var onClose: (() -> Void)?
+    var isFocused = false {
+        didSet { needsDisplay = true }
+    }
+    var isHovered = false {
+        didSet { closeButton.isHidden = !isHovered }
+    }
+    var showsDivider = false {
+        didSet { needsDisplay = true }
+    }
+
+    private let icon = NSImageView()
+    private let title = NSTextField(labelWithString: "")
+    private let closeButton = NSButton()
+
+    init() {
+        super.init(frame: .zero)
+        title.font = .systemFont(ofSize: 12)
+        title.lineBreakMode = .byTruncatingTail
+        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close Tab")?
+            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
+        closeButton.isBordered = false
+        closeButton.contentTintColor = .tertiaryLabelColor
+        closeButton.target = self
+        closeButton.action = #selector(closeClicked)
+        closeButton.toolTip = "Close Tab"
+        closeButton.isHidden = true
+        for view in [icon, title, closeButton] as [NSView] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 14),
+            icon.heightAnchor.constraint(equalToConstant: 14),
+            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
+            title.centerYAnchor.constraint(equalTo: centerYAnchor),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -6),
+            closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -3),
+            closeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            closeButton.widthAnchor.constraint(equalToConstant: 16),
+            closeButton.heightAnchor.constraint(equalToConstant: 16),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    func configure(with member: SidebarMember) {
+        switch member {
+        case .tab(let tab):
+            title.stringValue = tab.title
+            toolTip = tab.title
+            icon.image = tab.favicon ?? NSImage(systemSymbolName: "globe", accessibilityDescription: nil)
+            icon.contentTintColor = tab.favicon == nil ? .secondaryLabelColor : nil
+            icon.alphaValue = tab.isLoading ? 0.4 : 1
+            closeButton.toolTip = "Close Tab"
+        case .easel(let easel):
+            title.stringValue = easel.title
+            toolTip = easel.title
+            icon.image = NSImage(systemSymbolName: "rectangle.on.rectangle.angled", accessibilityDescription: "Easel")
+            icon.contentTintColor = .secondaryLabelColor
+            icon.alphaValue = 1
+            closeButton.toolTip = "Remove from Split View"
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if isFocused {
+            NSColor.labelColor.withAlphaComponent(0.1).setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 6, yRadius: 6).fill()
+        }
+        if showsDivider {
+            NSColor.separatorColor.setFill()
+            NSRect(x: 0, y: 7, width: 1, height: bounds.height - 14).fill()
+        }
     }
 
     @objc private func closeClicked() {

@@ -46,6 +46,19 @@ public struct SplitGroup: Identifiable, Equatable, Sendable {
         return true
     }
 
+    /// Puts `tab` just before or after `neighbour`: added if it's new (and
+    /// there's room), moved if it's already a pane. Panes share the space
+    /// equally again. Returns false if nothing could be placed.
+    @discardableResult
+    public mutating func place(_ tab: UUID, beside neighbour: UUID, after: Bool) -> Bool {
+        guard tab != neighbour, contains(neighbour), contains(tab) || !isFull else { return false }
+        tabIDs.removeAll { $0 == tab }
+        guard let index = tabIDs.firstIndex(of: neighbour) else { return false }
+        tabIDs.insert(tab, at: after ? index + 1 : index)
+        fractions = Self.equal(tabIDs.count)
+        return true
+    }
+
     /// Removes `tab`; its share goes to the remaining panes in proportion.
     public mutating func remove(_ tab: UUID) {
         guard let index = tabIDs.firstIndex(of: tab) else { return }

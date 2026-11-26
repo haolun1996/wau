@@ -8,6 +8,12 @@ extension BrowserWindowController {
     func showEasel(_ id: UUID) {
         guard let easel = easels.easel(withID: id) else { return }
         dismissCommandBar()
+        // An Easel in a split shows as its pane, with the split.
+        if model.split(containing: id) != nil {
+            hideEasel()
+            model.focusEasel(id)
+            return
+        }
         shownEaselID = id
         easelCanvas.show(easel)
         easelCanvas.isHidden = false
@@ -29,6 +35,14 @@ extension BrowserWindowController {
     func bindEasels() {
         easels.onChange = { [weak self] in
             guard let self else { return }
+            for (id, canvas) in paneCanvases {
+                if let easel = easels.easel(withID: id) { canvas.show(easel) }
+            }
+            // Deleted Easels leave their splits.
+            model.easelsChanged()
+            if let canvas = focusedPaneCanvas {
+                window?.title = canvas.easelID.flatMap { easels.easel(withID: $0)?.title } ?? "Easel"
+            }
             if let shown = shownEaselID {
                 if let easel = easels.easel(withID: shown) {
                     easelCanvas.show(easel)
@@ -40,14 +54,26 @@ extension BrowserWindowController {
             sidebar.reloadTabs()
         }
         easels.onItemsChange = { [weak self] id in
-            guard let self, shownEaselID == id else { return }
-            easelCanvas.reloadItems()
+            guard let self else { return }
+            if shownEaselID == id { easelCanvas.reloadItems() }
+            paneCanvases[id]?.reloadItems()
         }
-        easelCanvas.onOpenURL = { [weak self] url in
+        wire(easelCanvas)
+    }
+
+    /// A canvas for an Easel shown as a pane of a split.
+    func makeEaselCanvas() -> EaselCanvasView {
+        let canvas = EaselCanvasView(store: easels)
+        wire(canvas)
+        return canvas
+    }
+
+    private func wire(_ canvas: EaselCanvasView) {
+        canvas.onOpenURL = { [weak self] url in
             self?.hideEasel()
             self?.model.open(url: url)
         }
-        easelCanvas.onCapture = { [weak self] easelID in self?.startCapture(into: easelID) }
+        canvas.onCapture = { [weak self] easelID in self?.startCapture(into: easelID) }
     }
 
     // MARK: Actions

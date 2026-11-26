@@ -15,8 +15,12 @@ final class Space {
     var pinned: [Tab] = []
     var tabs: [Tab] = []
     var selectedTabID: UUID?
-    /// Split View groups among this Space's tabs; a tab is in at most one.
+    /// Split View groups among this Space's tabs and Easels; each is in at
+    /// most one, and every group holds at least one tab.
     var splits: [SplitGroup] = []
+    /// An Easel pane of the split on screen has the focus (the selected tab
+    /// is then another pane of that split).
+    var focusedEaselID: UUID?
 
     init(record: SpaceRecord) {
         id = record.id
@@ -38,6 +42,19 @@ final class Space {
     }
 }
 
+/// One pane of what's on screen: a tab, or an Easel in a split.
+enum SplitPane {
+    case tab(Tab)
+    case easel(UUID)
+
+    var id: UUID {
+        switch self {
+        case .tab(let tab): tab.id
+        case .easel(let id): id
+        }
+    }
+}
+
 enum TabSection {
     case pinned
     case regular
@@ -54,6 +71,8 @@ final class BrowserModel {
     private(set) var recentlyClosed: [TabRecord] = []
     private static let recentlyClosedLimit = 25
 
+    /// The Easels of a Space, which can be split with its tabs.
+    var easelIDs: (UUID) -> Set<UUID> = { _ in [] }
     /// Tabs, Spaces or the selection changed.
     var onChange: (() -> Void)?
     /// Split pane sizes changed; nothing else needs redrawing, only saving.
@@ -258,7 +277,7 @@ final class BrowserModel {
     /// Shows `tab`, switching to its Space if needed.
     func select(_ tab: Tab) {
         let space = self.space(containing: tab) ?? currentSpace
-        guard space.id != currentSpaceID || space.selectedTabID != tab.id else { return }
+        guard space.id != currentSpaceID || space.selectedTabID != tab.id || space.focusedEaselID != nil else { return }
         currentSpaceID = space.id
         markSelected(tab, in: space)
         changed()
@@ -477,13 +496,29 @@ final class BrowserModel {
         return currentSpace.splits.first { $0.contains(selected.id) }
     }
 
-    /// The tabs on screen: the selected tab, or every pane of its split.
+    /// The tabs on screen: the selected tab, or every tab of its split.
     var visibleTabs: [Tab] {
+        visiblePanes.compactMap { if case .tab(let tab) = $0 { tab } else { nil } }
+    }
+
+    /// What's on screen, in order: the selected tab, or every pane of its
+    /// split (tabs and Easels).
+    var visiblePanes: [SplitPane] {
         guard let selected else { return [] }
-        guard let group = visibleSplit else { return [selected] }
+        guard let group = visibleSplit else { return [.tab(selected)] }
         let spaceTabs = currentSpace.pinned + currentSpace.tabs
-        let tabs = group.tabIDs.compactMap { id in spaceTabs.first { $0.id == id } }
-        return tabs.count >= 2 ? tabs : [selected]
+        let easels = easelIDs(currentSpaceID)
+        let panes = group.tabIDs.compactMap { id -> SplitPane? in
+            if let tab = spaceTabs.first(where: { $0.id == id }) { return .tab(tab) }
+            return easels.contains(id) ? .easel(id) : nil
+        }
+        return panes.count >= 2 ? panes : [.tab(selected)]
+    }
+
+    /// The pane with the focus: an Easel of the split on screen, or the
+    /// selected tab.
+    var focusedPaneID: UUID? {
+        currentSpace.focusedEaselID ?? currentSpace.selectedTabID
     }
 
     /// Whether `tab` can join the selected tab in a split.
@@ -516,6 +551,106 @@ final class BrowserModel {
         return true
     }
 
+    /// Whether `id` is a tab (not a favorite) or an Easel of the current Space.
+    private func isPaneCandidate(_ id: UUID) -> Bool {
+        isTabInCurrentSpace(id) || easelIDs(currentSpaceID).contains(id)
+    }
+
+    private func isTabInCurrentSpace(_ id: UUID) -> Bool {
+        (currentSpace.pinned + currentSpace.tabs).contains { $0.id == id }
+    }
+
+    /// Whether `id` (a tab or Easel) can join `target` (any tab or Easel of
+    /// the current Space) in a split: they're different, the target's split
+    /// has room or already holds it, and the split would hold a tab.
+    func canJoin(_ id: UUID, beside target: UUID) -> Bool {
+        guard id != target, isPaneCandidate(id), isPaneCandidate(target) else { return false }
+        if let group = currentSpace.splits.first(where: { $0.contains(target) }) {
+            return group.contains(id) || !group.isFull
+        }
+        return isTabInCurrentSpace(id) || isTabInCurrentSpace(target)
+    }
+
+    func canJoin(_ tab: Tab, beside target: Tab) -> Bool {
+        canJoin(tab.id, beside: target.id)
+    }
+
+    /// Whether `id` can be dropped beside `target`, one of the panes on screen.
+    func canPlace(_ id: UUID, beside target: UUID) -> Bool {
+        visiblePanes.contains { $0.id == target } && canJoin(id, beside: target)
+    }
+
+    func canPlace(_ tab: Tab, beside target: Tab) -> Bool {
+        canPlace(tab.id, beside: target.id)
+    }
+
+    /// Shows `id` (a tab or Easel) just before or after `target`: starts a
+    /// split, adds a pane, or moves a pane that's already there. The dropped
+    /// pane gets the focus, so the split comes on screen.
+    @discardableResult
+    func placeInSplit(_ id: UUID, beside target: UUID, after: Bool) -> Bool {
+        guard canJoin(id, beside: target) else { return false }
+        let space = currentSpace
+        if let index = space.splits.firstIndex(where: { $0.contains(target) }) {
+            for other in space.splits.indices where other != index { space.splits[other].remove(id) }
+            space.splits[index].place(id, beside: target, after: after)
+        } else {
+            for other in space.splits.indices { space.splits[other].remove(id) }
+            space.splits.append(SplitGroup(tabIDs: after ? [target, id] : [id, target]))
+        }
+        focus(id, in: space)
+        changed()
+        return true
+    }
+
+    @discardableResult
+    func placeInSplit(_ tab: Tab, beside target: Tab, after: Bool) -> Bool {
+        placeInSplit(tab.id, beside: target.id, after: after)
+    }
+
+    /// Shows the split holding Easel `id` with that Easel focused. False if
+    /// it isn't in a split of the current Space.
+    @discardableResult
+    func focusEasel(_ id: UUID) -> Bool {
+        guard currentSpace.splits.contains(where: { $0.contains(id) }) else { return false }
+        focus(id, in: currentSpace)
+        changed()
+        return true
+    }
+
+    /// Gives a pane the focus: a tab is selected; an Easel is focused with
+    /// one of its split's tabs selected, keeping the selected one if it's there.
+    private func focus(_ id: UUID, in space: Space) {
+        let spaceTabs = space.pinned + space.tabs
+        if let tab = spaceTabs.first(where: { $0.id == id }) {
+            markSelected(tab, in: space)
+            return
+        }
+        guard let group = space.splits.first(where: { $0.contains(id) }) else { return }
+        if space.selectedTabID.map(group.contains) != true,
+           let tab = group.tabIDs.lazy.compactMap({ member in spaceTabs.first { $0.id == member } }).first {
+            markSelected(tab, in: space)
+        }
+        space.focusedEaselID = id
+    }
+
+    /// Takes a tab or Easel out of its split.
+    func removeFromSplit(paneID id: UUID) {
+        guard let index = currentSpace.splits.firstIndex(where: { $0.contains(id) }) else { return }
+        currentSpace.splits[index].remove(id)
+        changed()
+    }
+
+    /// The split holding a tab or Easel of the current Space.
+    func split(containing id: UUID) -> SplitGroup? {
+        currentSpace.splits.first { $0.contains(id) }
+    }
+
+    /// Easels were added or deleted: drop deleted ones from splits.
+    func easelsChanged() {
+        changed()
+    }
+
     /// Takes a tab out of its split; it stays open on its own.
     func removeFromSplit(_ tab: Tab) {
         guard let space = space(containing: tab),
@@ -544,13 +679,20 @@ final class BrowserModel {
     /// then tells observers.
     private func changed() {
         for space in spaces {
-            let ids = Set((space.pinned + space.tabs).map(\.id))
+            let tabIDs = Set((space.pinned + space.tabs).map(\.id))
+            let ids = tabIDs.union(easelIDs(space.id))
             var claimed = Set<UUID>()
             space.splits = space.splits.compactMap { group in
                 var group = group
                 group.retain(ids.subtracting(claimed))
                 claimed.formUnion(group.tabIDs)
-                return group.isValid ? group : nil
+                // A split needs a tab: Easels alone aren't shown together.
+                return group.isValid && group.tabIDs.contains(where: tabIDs.contains) ? group : nil
+            }
+            // A focused Easel must be a pane of the selected tab's split.
+            if let easel = space.focusedEaselID,
+               !space.splits.contains(where: { $0.contains(easel) && space.selectedTabID.map($0.contains) == true }) {
+                space.focusedEaselID = nil
             }
         }
         onChange?()
@@ -558,6 +700,7 @@ final class BrowserModel {
 
     private func markSelected(_ tab: Tab, in space: Space) {
         space.selectedTabID = tab.id
+        space.focusedEaselID = nil
         tab.lastActiveAt = Date()
     }
 

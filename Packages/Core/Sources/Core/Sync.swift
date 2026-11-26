@@ -170,13 +170,15 @@ public enum SyncMapping {
             tabs += regularTabs.filter { $0.spaceID == space.id }
         }
         let selected = snapshot.selectedSpaceID.flatMap { spaceIDs.contains($0) ? $0 : nil } ?? fallbackSpace
-        // Splits are local; keep those whose Space and tabs survived.
+        // Splits are local; keep those whose Space and tabs survived. Members
+        // that were never tabs here (Easels) are left for the app to check.
         var splits: [UUID: [SplitGroup]] = [:]
+        let localTabIDs = Set(snapshot.tabs.map(\.id))
         for (spaceID, groups) in snapshot.splits where spaceIDs.contains(spaceID) {
             let tabIDs = Set(tabs.filter { $0.spaceID == spaceID }.map(\.id))
             let kept = groups.map { group -> SplitGroup in
                 var group = group
-                group.retain(tabIDs)
+                group.retain(Set(group.tabIDs.filter { tabIDs.contains($0) || !localTabIDs.contains($0) }))
                 return group
             }.filter(\.isValid)
             if !kept.isEmpty { splits[spaceID] = kept }
