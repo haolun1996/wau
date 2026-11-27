@@ -22,13 +22,16 @@ enum MainMenu {
         ]))
 
         menu.addItem(submenu("File", [
-            item("New Tab", #selector(BrowserWindowController.newTab(_:)), "t"),
+            item("New Tab…", #selector(BrowserWindowController.newTab(_:)), "t"),
+            item("Blank Window", #selector(AppDelegate.newBlankWindow(_:)), "n", [.command, .control]),
+            item("New Incognito Window", #selector(AppDelegate.newIncognitoWindow(_:)), "n", [.command, .shift]),
             item("New Little Wau Window", #selector(AppDelegate.newLittleWauWindow(_:)), "n", [.command, .option]),
+            item("Restore Last Closed Tab", #selector(BrowserWindowController.reopenClosedTab(_:)), "t", [.command, .shift]),
+            .separator(),
             item("Open in Wau", #selector(LittleWauWindowController.openInMainWindow(_:)), "o"),
-            item("Open Location…", #selector(BrowserWindowController.openLocation(_:)), "l"),
+            item("Open Location…", #selector(BrowserWindowController.openLocation(_:))),
             .separator(),
             item("Close Tab", #selector(BrowserWindowController.closeTab(_:)), "w"),
-            item("Reopen Closed Tab", #selector(BrowserWindowController.reopenClosedTab(_:)), "t", [.command, .shift]),
             .separator(),
             item("Pin Tab", #selector(BrowserWindowController.togglePinned(_:)), "d"),
             item("Copy Page Link", #selector(BrowserWindowController.copyPageLink(_:)), "c", [.command, .shift]),

@@ -1,7 +1,8 @@
 import AppKit
 import Core
 
-/// The ⌘T / ⌘L launcher: a blurred panel floating over the page.
+/// The ⌘T launcher (and the address field's): a blurred panel floating
+/// over the page.
 /// It covers the whole window so a click outside the panel dismisses it.
 /// What it lists comes from `suggestions`, supplied by the window.
 @MainActor
@@ -9,7 +10,7 @@ final class CommandBarView: NSView, NSTextFieldDelegate {
     enum Mode {
         /// ⌘T: results open in a new tab.
         case newTab
-        /// ⌘L: results replace the current tab's page.
+        /// From the address field: results replace the current tab's page.
         case currentTab
         /// ⌃⇧=: results open as a new Split View pane.
         case split

@@ -32,7 +32,7 @@ extension BrowserWindowController {
 
     /// Shows the Space editor as a sheet: for `space`, or a new Space when nil.
     func presentSpaceEditor(for space: Space?) {
-        guard let window else { return }
+        guard let window, kind == .main else { return }
         let sheet = NSWindow(contentRect: .zero, styleMask: [.titled], backing: .buffered, defer: false)
         let draft = SpaceDraft(
             name: space?.name ?? "",
@@ -60,7 +60,7 @@ extension BrowserWindowController {
     }
 
     func confirmDelete(_ space: Space) {
-        guard let window, model.spaces.count > 1 else { NSSound.beep(); return }
+        guard let window, kind == .main, model.spaces.count > 1 else { NSSound.beep(); return }
         let alert = NSAlert()
         alert.messageText = "Delete “\(space.name)”?"
         let tabCount = space.pinned.count + space.tabs.count

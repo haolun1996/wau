@@ -34,6 +34,10 @@ struct SpaceThemeTests {
         }
         #expect(SpaceTheme.theme(withID: "nope") == nil)
         #expect(SpaceTheme.all.contains(SpaceTheme.default))
+        // Incognito windows' theme is found but not offered for Spaces.
+        #expect(SpaceTheme.theme(withID: SpaceTheme.incognito.id) == .incognito)
+        #expect(!SpaceTheme.all.contains(.incognito))
+        #expect(!ids.contains(SpaceTheme.incognito.id))
     }
 
     /// The accent is the highlight behind white text in the command bar, so it

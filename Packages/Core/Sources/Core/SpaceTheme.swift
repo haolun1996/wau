@@ -84,8 +84,16 @@ public struct SpaceTheme: Identifiable, Equatable, Hashable, Sendable {
     }
 
     public static func theme(withID id: String) -> SpaceTheme? {
-        all.first { $0.id == id }
+        (all + [incognito]).first { $0.id == id }
     }
+
+    /// Incognito windows only; not offered for Spaces.
+    public static let incognito = SpaceTheme(
+        id: "incognito",
+        name: "Incognito",
+        inspiration: "A kite flown after dark, lit only by the stars",
+        top: ThemeColor(0x2E2A3A), bottom: ThemeColor(0x14121A), accent: ThemeColor(0x8E7CC3)
+    )
 
     public static let bulan = SpaceTheme(
         id: "bulan",

@@ -166,6 +166,11 @@ public final class AppDatabase: Sendable {
                 t.add(column: "position", .integer).notNull().defaults(to: 0)
             }
         }
+        migrator.registerMigration("v12: pinned easels") { db in
+            try db.alter(table: "easel") { t in
+                t.add(column: "isPinned", .boolean).notNull().defaults(to: false)
+            }
+        }
         return migrator
     }
 
@@ -469,7 +474,10 @@ public final class AppDatabase: Sendable {
         try writer.read { db in
             let easels = try Row.fetchAll(db, sql: "SELECT * FROM easel ORDER BY createdAt").compactMap { row -> Easel? in
                 guard let id = UUID(uuidString: row["id"]), let space = UUID(uuidString: row["spaceID"]) else { return nil }
-                return Easel(id: id, spaceID: space, title: row["title"], createdAt: row["createdAt"], position: row["position"])
+                return Easel(
+                    id: id, spaceID: space, title: row["title"], createdAt: row["createdAt"],
+                    position: row["position"], isPinned: row["isPinned"]
+                )
             }
             let items = try Row.fetchAll(db, sql: "SELECT * FROM easelItem ORDER BY z").compactMap { row -> EaselItem? in
                 guard let id = UUID(uuidString: row["id"]), let easel = UUID(uuidString: row["easelID"]),
@@ -521,8 +529,8 @@ public final class AppDatabase: Sendable {
 
     private static func upsert(_ easel: Easel, in db: Database) throws {
         try db.execute(
-            sql: "INSERT OR REPLACE INTO easel (id, spaceID, title, createdAt, position) VALUES (?, ?, ?, ?, ?)",
-            arguments: [easel.id.uuidString, easel.spaceID.uuidString, easel.title, easel.createdAt, easel.position]
+            sql: "INSERT OR REPLACE INTO easel (id, spaceID, title, createdAt, position, isPinned) VALUES (?, ?, ?, ?, ?, ?)",
+            arguments: [easel.id.uuidString, easel.spaceID.uuidString, easel.title, easel.createdAt, easel.position, easel.isPinned]
         )
     }
 

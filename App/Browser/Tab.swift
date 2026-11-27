@@ -204,9 +204,34 @@ enum Profiles {
     static func dataStore(for profileID: UUID?) -> WKWebsiteDataStore {
         guard let profileID else { return .default() }
         if let store = stores[profileID] { return store }
-        let store = WKWebsiteDataStore(forIdentifier: profileID)
+        // A private profile asked for after its windows closed stays in memory.
+        let store = privateUsers[profileID] != nil ? .nonPersistent() : WKWebsiteDataStore(forIdentifier: profileID)
         stores[profileID] = store
         return store
+    }
+
+    /// Open windows using each private profile.
+    private static var privateUsers: [UUID: Int] = [:]
+
+    /// A profile kept only in memory, for an incognito window: nothing it
+    /// stores (cookies, logins, caches) reaches the disk.
+    static func makePrivate() -> UUID {
+        let id = UUID()
+        stores[id] = .nonPersistent()
+        privateUsers[id] = 1
+        return id
+    }
+
+    /// Another window (a tab dragged out of an incognito one) uses it too.
+    static func retainPrivate(_ profileID: UUID) {
+        privateUsers[profileID, default: 0] += 1
+    }
+
+    /// A window using a private profile closed; the last one drops its data.
+    static func releasePrivate(_ profileID: UUID) {
+        guard let users = privateUsers[profileID] else { return }
+        privateUsers[profileID] = users - 1
+        if users <= 1 { stores[profileID] = nil }
     }
 
     /// Permanently erases a profile's data, after its Space is deleted.

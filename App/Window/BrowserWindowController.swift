@@ -26,8 +26,28 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     var searchEngine: SearchEngine { Preferences.shared.searchEngine }
     /// Called after Spaces, tabs or the selection change (used to schedule a sync).
     var onModelChange: (() -> Void)?
-    private let saver: SessionSaver
-    private let history: HistoryRecorder
+    /// The main window, or an extra one that isn't kept: a blank window,
+    /// or an incognito one that also keeps no history or website data.
+    enum Kind {
+        case main
+        case blank
+        case incognito
+    }
+    let kind: Kind
+    /// An extra window closed; its controller can go.
+    var onClose: (() -> Void)?
+    /// A tab was dragged out of the window and dropped on the desktop at
+    /// this screen point, to open in a window of its own.
+    var onTearOff: ((Tab, NSPoint) -> Void)?
+    /// Finds a tab in any window, so tabs can be dragged between windows.
+    var findTab: ((UUID) -> (Tab, BrowserWindowController)?)?
+    /// A tab drag started or ended in some window's sidebar; every window's
+    /// page area gets ready to take it.
+    var onTabDragChanged: ((Bool) -> Void)?
+    /// Only the main window's tabs are saved and synced.
+    private let saver: SessionSaver?
+    /// Nil in an incognito window.
+    private let history: HistoryRecorder?
     let sidebar: SidebarViewController
     let content = WebContentView()
     let easels: EaselStore
@@ -54,7 +74,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     var archiveTask: Task<Void, Never>?
     var archiveObservers: [NSObjectProtocol] = []
 
-    init(database: AppDatabase, favicons: FaviconService, easels: EaselStore) {
+    /// `profileID` gives an extra window the website data of the tab it was
+    /// torn off from (for incognito, that window's private data).
+    init(
+        database: AppDatabase, favicons: FaviconService, easels: EaselStore,
+        kind: Kind = .main, themeID: String? = nil, profileID: UUID? = nil
+    ) {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -73,22 +98,44 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         self.favicons = favicons
         self.easels = easels
         easelCanvas = EaselCanvasView(store: easels)
-        saver = SessionSaver(database: database, snapshot: { [model] in model.snapshot })
-        history = HistoryRecorder(database: database)
+        self.kind = kind
+        saver = kind == .main ? SessionSaver(database: database, snapshot: { [model] in model.snapshot }) : nil
+        history = kind == .incognito ? nil : HistoryRecorder(database: database)
         sidebar = SidebarViewController(model: model)
         super.init(window: window)
 
         window.delegate = self
-        model.easelIDs = { [easels] spaceID in Set(easels.easels(in: spaceID).map(\.id)) }
+        if kind == .main {
+            model.easelIDs = { [easels] spaceID in Set(easels.easels(in: spaceID).map(\.id)) }
+        } else {
+            // One Space of its own, starting empty.
+            let privateProfile = profileID.map { id in Profiles.retainPrivate(id); return id }
+            let space = kind == .incognito
+                ? SpaceRecord(name: "Incognito", icon: "🕶️", themeID: SpaceTheme.incognito.id,
+                              profileID: privateProfile ?? Profiles.makePrivate())
+                : SpaceRecord(name: "Blank Window", icon: "🪁", themeID: themeID ?? SpaceTheme.default.id, profileID: profileID)
+            model.restore(BrowserSnapshot(spaces: [space], selectedSpaceID: space.id))
+        }
         buildLayout(in: window)
         bindModel()
         bindEasels()
         installSpaceSwipe()
         titlebarDoubleClick = TitlebarDoubleClick(window: window)
-        startArchiving()
         applyTheme(model.currentSpace.theme)
-        if !window.setFrameUsingName("BrowserWindow") { window.center() }
-        window.setFrameAutosaveName("BrowserWindow")
+        if kind == .main {
+            startArchiving()
+            if !window.setFrameUsingName("BrowserWindow") { window.center() }
+            window.setFrameAutosaveName("BrowserWindow")
+        } else {
+            sidebar.isSingleSpace = true
+            // Just below and right of the window in front.
+            if let front = NSApp.mainWindow {
+                window.setFrame(front.frame, display: false)
+                window.setFrameTopLeftPoint(window.cascadeTopLeft(from: NSPoint(x: front.frame.minX, y: front.frame.maxY)))
+            } else {
+                window.center()
+            }
+        }
     }
 
     @available(*, unavailable)
@@ -131,12 +178,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
 
     /// Records a visit for a page shown outside this window (Little Wau).
     func recordVisit(_ tab: Tab) {
-        history.pageLoaded(tab)
+        history?.pageLoaded(tab)
     }
 
     /// Writes the session now instead of after the usual short delay.
     func saveSessionNow() {
-        saver.saveNow()
+        saver?.saveNow()
     }
 
     // MARK: Layout
@@ -203,14 +250,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         sidebar.onToggleSidebar = { [weak self] in self?.toggleBrowserSidebar(nil) }
         sidebar.onSplitWith = { [weak self] tab in self?.model.addToSplit(tab) }
         sidebar.easelsInSpace = { [weak self] in
-            guard let self else { return [] }
+            guard let self, kind == .main else { return [] }
             return easels.easels(in: model.currentSpaceID)
         }
         sidebar.shownEaselID = { [weak self] in self?.shownEaselID }
         sidebar.onSelectEasel = { [weak self] easel in self?.showEasel(easel.id) }
         sidebar.onDeleteEasel = { [weak self] easel in self?.confirmDelete(easel) }
         sidebar.onRenameEasel = { [weak self] easel in self?.rename(easel) }
-        sidebar.onMoveEasel = { [weak self] easel, gap in self?.easels.move(easel.id, toGap: gap) }
+        sidebar.onMoveEasel = { [weak self] easel, pinned, gap in self?.easels.move(easel.id, pinned: pinned, toGap: gap) }
+        sidebar.onPinEasel = { [weak self] easel, pinned in self?.easels.setPinned(easel.id, pinned) }
         sidebar.onTabChosen = { [weak self] in self?.hideEasel() }
         content.onFocusPane = { [weak self] index in
             guard let self else { return }
@@ -221,13 +269,26 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
             case .easel(let id): model.focusEasel(id)
             }
         }
-        sidebar.onTabDrag = { [weak self] dragging in self?.content.isTabDragActive = dragging }
+        sidebar.onTabDrag = { [weak self] dragging in
+            guard let self else { return }
+            if let broadcast = onTabDragChanged { broadcast(dragging) } else { content.isTabDragActive = dragging }
+        }
+        sidebar.canReceiveTab = { [weak self] id in self?.foreignTab(id) != nil }
+        sidebar.receiveTab = { [weak self] id in self?.receive(id) }
+        sidebar.onTearOff = { [weak self] tab, point in self?.onTearOff?(tab, point) }
         content.canDropTab = { [weak self] id, pane, _ in
             guard let self, let target = paneID(at: pane) else { return false }
-            return model.canPlace(id, beside: target)
+            if model.canPlace(id, beside: target) { return true }
+            // A tab from another window can split with any page here that has room.
+            return foreignTab(id) != nil && model.visibleSplit?.isFull != true
+                && model.selected.map { !model.isFavorite($0) } == true
         }
         content.onDropTab = { [weak self] id, pane, after in
             guard let self, let target = paneID(at: pane) else { return false }
+            if foreignTab(id) != nil {
+                guard let tab = receive(id) else { return false }
+                return model.placeInSplit(tab.id, beside: target, after: after)
+            }
             return model.placeInSplit(id, beside: target, after: after)
         }
         content.onFractionsChanged = { [weak self] fractions in
@@ -248,6 +309,39 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     }
 
     /// Clamped so the sidebar stays usable and the page keeps some room.
+    // MARK: Tabs moving between windows
+
+    /// A tab in another window that may move to this one: not a favorite,
+    /// and incognito tabs only between incognito windows.
+    private func foreignTab(_ id: UUID) -> (Tab, BrowserWindowController)? {
+        guard let (tab, source) = findTab?(id), source !== self,
+              (source.kind == .incognito) == (kind == .incognito),
+              !source.model.isFavorite(tab)
+        else { return nil }
+        return (tab, source)
+    }
+
+    /// Moves a tab from another window into this one (at the top of the
+    /// current Space, selected). A Blank or Incognito window left with no
+    /// tabs closes.
+    func receive(_ id: UUID) -> Tab? {
+        guard let (tab, source) = foreignTab(id) else { return nil }
+        source.model.detach(tab)
+        let adopted = model.adopt(tab)
+        source.closeIfEmptied()
+        return adopted
+    }
+
+    /// A Blank or Incognito window whose last tab moved away closes.
+    func closeIfEmptied() {
+        guard kind != .main, model.allTabs.isEmpty else { return }
+        // After the drag that emptied it has finished: its sidebar started it.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, model.allTabs.isEmpty else { return }
+            window?.close()
+        }
+    }
+
     /// The tab or Easel shown in the pane at `index`.
     private func paneID(at index: Int) -> UUID? {
         let panes = model.visiblePanes
@@ -263,19 +357,21 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     private func bindModel() {
         model.onChange = { [weak self] in
             self?.modelDidChange()
-            self?.saver.setNeedsSave()
+            self?.saver?.setNeedsSave()
             self?.onModelChange?()
         }
-        model.onLayoutChange = { [weak self] in self?.saver.setNeedsSave() }
+        model.onLayoutChange = { [weak self] in self?.saver?.setNeedsSave() }
         model.onTabUpdated = { [weak self] tab in
             guard let self else { return }
             sidebar.refresh(tab)
             if tab === model.selected { window?.title = tab.title }
-            history.tabChanged(tab)
-            saver.setNeedsSave()
+            history?.tabChanged(tab)
+            saver?.setNeedsSave()
         }
         model.onTabFinishedLoading = { [weak self] tab in
-            self?.history.pageLoaded(tab)
+            self?.history?.pageLoaded(tab)
+            // An incognito window doesn't fetch icons, which would be stored.
+            guard self?.kind != .incognito else { return }
             self?.favicons.refresh(tab) { [weak self] host, icon in
                 guard let self else { return }
                 for tab in model.allTabs where FaviconService.host(of: tab.url) == host {
@@ -406,6 +502,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @objc func togglePinned(_ sender: Any?) {
+        // ⌘D on an Easel pins or unpins the Easel.
+        if let easel = activeEaselCanvas?.easelID.flatMap(easels.easel(withID:)) {
+            easels.setPinned(easel.id, !easel.isPinned)
+            return
+        }
         guard let tab = model.selected, !model.isFavorite(tab) else { NSSound.beep(); return }
         model.setPinned(tab, !model.isPinned(tab))
     }
@@ -506,12 +607,31 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         titlebarDoubleClick?.invalidate()
         removeSpaceSwipe()
         stopArchiving()
+        guard kind != .main else { return }
+        // An extra window's tabs aren't kept; neither is incognito data.
+        dismissCommandBar()
+        let profiles = model.spaces.compactMap(\.profileID)
+        model.allTabs.forEach { $0.tearDown() }
+        if kind == .incognito { profiles.forEach(Profiles.releasePrivate) }
+        onClose?()
     }
 }
 
 extension BrowserWindowController: NSMenuItemValidation {
+    /// Menu commands for Spaces and Easels, which only the main window has.
+    static let mainWindowOnlyActions: Set<Selector?> = [
+        #selector(newSpace(_:)), #selector(editSpace(_:)), #selector(deleteSpace(_:)),
+        #selector(nextSpace(_:)), #selector(previousSpace(_:)), #selector(switchToSpaceNumber(_:)),
+        #selector(newEasel(_:)), #selector(captureToEasel(_:)), #selector(addPageToEasel(_:)),
+    ]
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         let selected = model.selected
+        // Extra windows have one Space of their own and no Easels.
+        if kind != .main, Self.mainWindowOnlyActions.contains(menuItem.action) {
+            if menuItem.action == #selector(switchToSpaceNumber(_:)) { menuItem.isHidden = true }
+            return false
+        }
         switch menuItem.action {
         case #selector(goBack(_:)):
             return selected?.canGoBack ?? false
@@ -524,6 +644,10 @@ extension BrowserWindowController: NSMenuItemValidation {
         case #selector(copyPageLink(_:)):
             return selected?.url != nil
         case #selector(togglePinned(_:)):
+            if let easel = activeEaselCanvas?.easelID.flatMap(easels.easel(withID:)) {
+                menuItem.title = easel.isPinned ? "Unpin Tab" : "Pin Tab"
+                return true
+            }
             menuItem.title = selected.map(model.isPinned) == true ? "Unpin Tab" : "Pin Tab"
             return selected.map { !model.isFavorite($0) } ?? false
         case #selector(toggleBrowserSidebar(_:)):

@@ -44,6 +44,13 @@ struct EaselStorageTests {
         #expect(try database.loadEasels().items == [fixed, fitting])
     }
 
+    @Test func pinnedEaselsAreKept() throws {
+        let database = try AppDatabase.inMemory()
+        let easel = Easel(spaceID: UUID(), title: "Plans", createdAt: Date(timeIntervalSince1970: 1_790_000_000), position: 1, isPinned: true)
+        try database.saveEasel(easel)
+        #expect(try database.loadEasels().easels == [easel])
+    }
+
     @Test func saveEaselsReplacesEverything() throws {
         let database = try AppDatabase.inMemory()
         try database.saveEasel(Easel(spaceID: UUID(), title: "Old"))

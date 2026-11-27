@@ -13,8 +13,9 @@ of Malaysia's east coast. Built natively with Swift, AppKit and WKWebView.
   buttons at the bottom of the sidebar, ⌃1–⌃9, ⌥⌘←/→ or a two-finger swipe.
 - **Malaysian themes**: Wau Bulan, Langkawi, Cameron, Melaka, Kinabalu,
   Songket, Batik and Nyonya.
-- **Command bar** (⌘T, ⌘L): addresses, search, open tabs in every Space,
-  history ranked by frequency and recency, archived tabs, and commands.
+- **Command bar** (⌘T, or click the address field to change this tab's
+  page): addresses, search, open tabs in every Space, history ranked by
+  frequency and recency, archived tabs, and commands.
 - **Auto-archive**: ordinary tabs you haven't looked at for 12 hours (or a
   day, week, month, or never, per Space) are archived. Bring them back from the
   command bar or History ▸ Archived Tabs, with their history.
@@ -26,6 +27,13 @@ of Malaysia's east coast. Built natively with Swift, AppKit and WKWebView.
   focus that pane, or drag it out into the list to take it out of the split.
   Easels can join a split too: drag one beside a tab, on the page or in the
   sidebar (a split always keeps at least one tab).
+- **Blank and Incognito windows**: ⌃⌘N opens an empty extra window and
+  ⇧⌘N a private one. Their tabs go when they close. Incognito keeps no
+  history, and its cookies, logins and caches stay in memory only. Drag a tab
+  out of the sidebar onto the desktop to move it into a new Blank Window
+  (an incognito one, from an incognito window), and into another window's
+  sidebar or page to move it back; a window left without tabs closes.
+  Incognito tabs only move between incognito windows.
 - **Little Wau**: a compact window for quick looks (⌥⌘N) and for links
   from other apps when Wau is your default browser. ⌘O moves the page into the main window.
 - **Easels**: canvases for clippings, page links, text, shapes and
@@ -37,7 +45,8 @@ of Malaysia's east coast. Built natively with Swift, AppKit and WKWebView.
   links; drag to move, drag any edge or corner to resize, ⌫ to delete. Label text grows and shrinks with its box;
   select a label and use the + / − pop-up beside it to pick a size instead
   (Aa goes back to filling the box). Pinch or ⌘+ / ⌘- / ⌘0 to zoom; rename an Easel
-  from its right-click menu in the sidebar.
+  from its right-click menu in the sidebar. Pin an Easel like a tab (right-click ▸
+  Pin Tab, ⌘D while it's open, or drag it above "New Tab").
 - **Google Drive sync**: Spaces, pinned tabs, favorites and Easels sync through
   a private app folder in your Drive. Open tabs, history and logins stay local.
 - Also: tabs restore on relaunch with their history (pages load when first
@@ -48,7 +57,7 @@ of Malaysia's east coast. Built natively with Swift, AppKit and WKWebView.
 
 | | |
 |---|---|
-| ⌘T / ⌘L | Command bar: new tab / change this tab's page |
+| ⌘T | Command bar for a new tab |
 | ⌘W / ⇧⌘T | Close tab (pinned tabs reset instead) / reopen closed tab |
 | ⌘D | Pin or unpin tab |
 | ⌘S | Show or hide the sidebar |
@@ -57,6 +66,7 @@ of Malaysia's east coast. Built natively with Swift, AppKit and WKWebView.
 | ⌃1–⌃9, ⌥⌘← / ⌥⌘→ | Go to Space 1–9 / previous / next Space |
 | ⌃⇧= / ⌃⇧- | Add a Split View pane / remove the focused pane |
 | ⇧⌘2 | Clip part of the page to an Easel |
+| ⌃⌘N / ⇧⌘N | Blank window / new Incognito window |
 | ⌥⌘N | New Little Wau window |
 | ⌘F, ⌘G, ⇧⌘G | Find in page, next, previous |
 | ⌘+ / ⌘- / ⌘0 | Zoom the page or Easel in / out / actual size |

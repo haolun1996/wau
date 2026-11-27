@@ -9,13 +9,16 @@ public struct Easel: Identifiable, Equatable, Sendable {
     /// Where it sits among its Space's Easels in the sidebar (lower first;
     /// ties go by creation).
     public var position: Int
+    /// Shown with the pinned tabs, above "New Tab".
+    public var isPinned: Bool
 
-    public init(id: UUID = UUID(), spaceID: UUID, title: String, createdAt: Date = Date(), position: Int = 0) {
+    public init(id: UUID = UUID(), spaceID: UUID, title: String, createdAt: Date = Date(), position: Int = 0, isPinned: Bool = false) {
         self.id = id
         self.spaceID = spaceID
         self.title = title
         self.createdAt = createdAt
         self.position = position
+        self.isPinned = isPinned
     }
 }
 
@@ -145,12 +148,14 @@ extension SyncMapping {
     public static func fields(from easels: EaselSnapshot) -> [String: SyncFields] {
         var result: [String: SyncFields] = [:]
         for easel in easels.easels {
-            result[easelPrefix + easel.id.uuidString] = [
+            var fields: SyncFields = [
                 "space": easel.spaceID.uuidString,
                 "title": easel.title,
                 "created": String(Int(easel.createdAt.timeIntervalSince1970)),
                 "position": String(easel.position),
             ]
+            if easel.isPinned { fields["pinned"] = "1" }
+            result[easelPrefix + easel.id.uuidString] = fields
         }
         for item in easels.items {
             var fields: SyncFields = [
@@ -180,7 +185,8 @@ extension SyncMapping {
             let created = values["created"].flatMap(Double.init).map(Date.init(timeIntervalSince1970:)) ?? .distantPast
             easels.append(Easel(
                 id: id, spaceID: space, title: values["title"] ?? "Easel", createdAt: created,
-                position: values["position"].flatMap(Int.init) ?? 0
+                position: values["position"].flatMap(Int.init) ?? 0,
+                isPinned: values["pinned"] == "1"
             ))
         }
         easels.sort { ($0.createdAt, $0.id.uuidString) < ($1.createdAt, $1.id.uuidString) }

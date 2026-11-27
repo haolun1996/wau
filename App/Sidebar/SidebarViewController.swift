@@ -32,8 +32,21 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
     var onEditSpace: ((Space) -> Void)?
     var onDeleteSpace: ((Space) -> Void)?
     var onSplitWith: ((Tab) -> Void)?
+    /// A blank or incognito window: one Space, no switcher or Space menu.
+    var isSingleSpace = false {
+        didSet {
+            spaceBar.isHidden = isSingleSpace
+            spaceMenuButton.isHidden = isSingleSpace
+        }
+    }
     /// A tab started (true) or stopped (false) being dragged out of the list.
     var onTabDrag: ((Bool) -> Void)?
+    /// A tab was dropped outside every Wau window, at this screen point.
+    var onTearOff: ((Tab, NSPoint) -> Void)?
+    /// Whether a tab dragged from another window may move into this one.
+    var canReceiveTab: ((UUID) -> Bool)?
+    /// Moves that tab into this window; returns it (now in this window).
+    var receiveTab: ((UUID) -> Tab?)?
     /// The current Space's Easels, listed below its tabs.
     var easelsInSpace: (() -> [Easel])?
     /// The Easel shown in the page area, highlighted in the list.
@@ -41,7 +54,10 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
     var onSelectEasel: ((Easel) -> Void)?
     var onDeleteEasel: ((Easel) -> Void)?
     /// An Easel was dragged to a gap among the Space's Easels (0 is the top).
-    var onMoveEasel: ((Easel, Int) -> Void)?
+    /// An Easel was dragged to a gap among the pinned Easels (true) or the
+    /// others (false); 0 is the top of that group.
+    var onMoveEasel: ((Easel, Bool, Int) -> Void)?
+    var onPinEasel: ((Easel, Bool) -> Void)?
     var onRenameEasel: ((Easel) -> Void)?
     /// The user picked a tab in the list (leaving any Easel that was shown).
     var onTabChosen: (() -> Void)?
@@ -240,10 +256,13 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
             }
             return members.count >= 2 ? .split(members) : (pinned ? .pinned(tab) : .regular(tab))
         }
-        rows = space.pinned.compactMap { row(for: $0, pinned: true) } + [.newTab]
-            + space.tabs.compactMap { row(for: $0, pinned: false) }
-        let splitEasels = Set(rows.flatMap(\.members).map(\.id))
-        rows += spaceEasels.filter { !splitEasels.contains($0.id) }.map(Row.easel)
+        let pinnedRows = space.pinned.compactMap { row(for: $0, pinned: true) }
+        let regularRows = space.tabs.compactMap { row(for: $0, pinned: false) }
+        let inSplits = Set((pinnedRows + regularRows).flatMap(\.members).map(\.id))
+        let listed = spaceEasels.filter { !inSplits.contains($0.id) }
+        // Pinned Easels follow the pinned tabs; the rest follow the tabs.
+        rows = pinnedRows + listed.filter(\.isPinned).map(Row.easel) + [.newTab]
+            + regularRows + listed.filter { !$0.isPinned }.map(Row.easel)
         let shownEasel = shownEaselID?()
 
         isSyncingSelection = true
@@ -379,6 +398,9 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         if case .easel(let easel) = member {
             menu.addItem(ClosureMenuItem("Open Easel") { [weak self] in self?.onSelectEasel?(easel) })
             menu.addItem(ClosureMenuItem("Rename Easel…") { [weak self] in self?.onRenameEasel?(easel) })
+            menu.addItem(ClosureMenuItem(easel.isPinned ? "Unpin Tab" : "Pin Tab") { [weak self] in
+                self?.onPinEasel?(easel, !easel.isPinned)
+            })
             if model.split(containing: easel.id) != nil {
                 menu.addItem(ClosureMenuItem("Remove from Split View") { [weak self] in
                     self?.model.removeFromSplit(paneID: easel.id)
@@ -511,11 +533,21 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         if rowIndexes.contains(where: { rows.indices.contains($0) && !rows[$0].members.isEmpty }) {
             onTabDrag?(true)
         }
+        // A tab let go on the desktop opens in a new window right there,
+        // instead of sliding back first.
+        session.animatesToStartingPositionsOnCancelOrFail = false
     }
 
     func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
         onTabDrag?(false)
         clearDrop()
+        // Let go outside every Wau window: the tab gets a window of its own.
+        let overWau = NSApp.windows.contains { $0.isVisible && $0.windowController != nil && $0.frame.contains(screenPoint) }
+        guard operation.isEmpty, !overWau,
+              let id = session.draggingPasteboard.pasteboardItems?.first?.string(forType: .wauTabRow).flatMap(UUID.init(uuidString:)),
+              let tab = (model.currentSpace.pinned + model.currentSpace.tabs).first(where: { $0.id == id })
+        else { return }
+        onTearOff?(tab, screenPoint)
     }
 
     // Every tab and Easel row can be dragged. Without this, pressing on an
@@ -538,22 +570,35 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         return item
     }
 
-    /// Where the Easels start in the list (they come after every tab).
+    /// The "New Tab" row, between the pinned rows and the rest.
+    private var newTabRow: Int {
+        rows.firstIndex { if case .newTab = $0 { true } else { false } } ?? 0
+    }
+
+    /// Where the pinned Easels start (after the pinned tabs).
+    private var firstPinnedEaselRow: Int {
+        rows[..<newTabRow].firstIndex { if case .easel = $0 { true } else { false } } ?? newTabRow
+    }
+
+    /// Where the other Easels start (after every tab).
     private var firstEaselRow: Int {
-        rows.firstIndex { if case .easel = $0 { true } else { false } } ?? rows.count
+        rows[newTabRow...].firstIndex { if case .easel = $0 { true } else { false } } ?? rows.count
     }
 
     /// Works out where a drag over the list would drop and shows it: over
     /// the middle of a tab or Easel row, the half it would take beside it;
     /// otherwise a line in the gap between rows.
     private func updateDrop(_ info: any NSDraggingInfo) -> NSDragOperation {
-        guard (info.draggingSource as? NSTableView) === tableView else {
+        let fromHere = (info.draggingSource as? NSTableView) === tableView
+        // A tab from another window can be dropped between rows to move here.
+        let fromElsewhere = !fromHere && draggedPaneID(info).map { canReceiveTab?($0) ?? false } == true
+        guard fromHere || fromElsewhere else {
             clearDrop()
             return []
         }
         let point = tableView.convert(info.draggingLocation, from: nil)
         let row = tableView.row(at: point)
-        if row >= 0 {
+        if row >= 0, fromHere {
             let middle = tableView.rect(ofRow: row).insetBy(dx: 0, dy: tableView.rect(ofRow: row).height / 4)
             if middle.contains(point), let target = splitDropTarget(info, row: row) {
                 pendingDrop = .split(row: row)
@@ -570,12 +615,13 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         } else {
             gap = point.y < 0 ? 0 : rows.count
         }
+        // Above "New Tab" is pinned: tabs first, then Easels. Below it, the
+        // same: tabs, then Easels.
+        let pinnedArea = gap <= newTabRow
         if info.draggingPasteboard.availableType(from: [.wauEaselRow]) != nil {
-            // Easels stay among the Easels, below the tabs.
-            gap = max(gap, firstEaselRow)
+            gap = max(gap, pinnedArea ? firstPinnedEaselRow : firstEaselRow)
         } else {
-            // Tabs stay above the Easels.
-            gap = min(gap, firstEaselRow)
+            gap = min(gap, pinnedArea ? firstPinnedEaselRow : firstEaselRow)
         }
         pendingDrop = .gap(gap)
         showInsertionLine(atGap: gap)
@@ -603,20 +649,31 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
             guard let id = UUID(uuidString: value),
                   let easel = (easelsInSpace?() ?? []).first(where: { $0.id == id })
             else { return false }
-            let gap = max(0, row - firstEaselRow)
+            // Above "New Tab" pins it; below unpins it.
+            let pinned = row <= newTabRow
+            let gap = max(0, row - (pinned ? firstPinnedEaselRow : firstEaselRow))
             // Dropped among the Easels, an Easel leaves its split.
             if model.split(containing: id) != nil { model.removeFromSplit(paneID: id) }
-            onMoveEasel?(easel, gap)
+            onMoveEasel?(easel, pinned, gap)
             return true
         }
         let space = model.currentSpace
-        guard let tab = draggedTab(info) else { return false }
         // Rows are [pinned…, New Tab, regular…], and a split row stands for
         // several tabs; count the tabs above the gap in the section it's in.
-        let newTabRow = rows.firstIndex { if case .newTab = $0 { true } else { false } } ?? 0
         let above = Set(rows[..<min(row, rows.count)].flatMap(\.tabs).map(\.id))
         let pinned = row <= newTabRow
-        let gap = (pinned ? space.pinned : space.tabs).filter { above.contains($0.id) }.count
+        var gap = (pinned ? space.pinned : space.tabs).filter { above.contains($0.id) }.count
+        let tab: Tab
+        if let own = draggedTab(info) {
+            tab = own
+        } else if let id = draggedPaneID(info), let received = receiveTab?(id) {
+            // From another window: it arrives at the top of the tabs, one
+            // place before every gap counted above.
+            tab = received
+            if !pinned { gap += 1 }
+        } else {
+            return false
+        }
         // Dropped among the rows, a pane leaves its split.
         if model.split(containing: tab) != nil { model.removeFromSplit(tab) }
         model.moveTab(tab, to: pinned ? .pinned : .regular, gap: gap)
@@ -763,7 +820,7 @@ private final class SidebarRowView: NSTableRowView {
 }
 
 /// The rounded field at the top of the sidebar showing the current site.
-/// Clicking it opens the command bar on the current tab (like ⌘L).
+/// Clicking it opens the command bar on the current tab, to change its page.
 private final class AddressPill: NSView {
     var onClick: (() -> Void)?
 

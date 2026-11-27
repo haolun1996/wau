@@ -79,6 +79,7 @@ extension BrowserWindowController {
     // MARK: Actions
 
     @objc func newEasel(_ sender: Any?) {
+        guard kind == .main else { NSSound.beep(); return }
         let count = easels.easels(in: model.currentSpaceID).count
         let easel = easels.createEasel(in: model.currentSpaceID, title: count == 0 ? "Easel" : "Easel \(count + 1)")
         showEasel(easel.id)

@@ -164,6 +164,37 @@ struct BrowserModelTests {
 }
 
 @MainActor
+@Suite("Incognito")
+struct IncognitoTests {
+    @Test func privateDataLastsWhileAnyWindowUsesIt() {
+        let profile = Profiles.makePrivate()
+        let store = Profiles.dataStore(for: profile)
+        Profiles.retainPrivate(profile) // a tab dragged out to a second window
+        Profiles.releasePrivate(profile) // the first window closes
+        #expect(Profiles.dataStore(for: profile) === store)
+        Profiles.releasePrivate(profile) // the last one closes
+        // Asked for again, it's still never on disk.
+        #expect(Profiles.dataStore(for: profile) !== store)
+        #expect(!Profiles.dataStore(for: profile).isPersistent)
+    }
+
+    @Test func privateProfilesStayInMemory() {
+        let profile = Profiles.makePrivate()
+        #expect(!Profiles.dataStore(for: profile).isPersistent)
+        #expect(Profiles.dataStore(for: nil).isPersistent)
+        // An incognito Space's tabs all share that store.
+        let model = BrowserModel()
+        let space = SpaceRecord(name: "Incognito", icon: "🕶️", themeID: SpaceTheme.incognito.id, profileID: profile)
+        model.restore(BrowserSnapshot(spaces: [space], selectedSpaceID: space.id))
+        #expect(model.allTabs.isEmpty)
+        let tab = model.open(url: nil)
+        #expect(!tab.webView.configuration.websiteDataStore.isPersistent)
+        Profiles.releasePrivate(profile)
+        tab.tearDown()
+    }
+}
+
+@MainActor
 @Suite("BrowserModel.reconcile")
 struct ReconcileTests {
     @Test func keepsOpenTabsAndAppliesSyncedChanges() throws {
@@ -284,6 +315,24 @@ struct SplitViewTests {
         model.select(a)
         b.lastActiveAt = .distantPast
         #expect(model.archiveStaleTabs().isEmpty)
+    }
+
+    @Test func aTabDraggedOutMovesToAnotherWindowStillOpen() {
+        let source = BrowserModel()
+        let a = source.open(url: nil)
+        let b = source.open(url: nil, select: false)
+        source.select(a)
+        source.placeInSplit(b, beside: a, after: true)
+        #expect(source.selected === b)
+        // b leaves: its split goes, and a takes over.
+        #expect(source.detach(b))
+        #expect(source.currentSpace.splits.isEmpty)
+        #expect(source.selected === a)
+        #expect(source.recentlyClosed.isEmpty) // moved, not closed
+        let target = BrowserModel()
+        target.adopt(b)
+        #expect(target.selected === b) // the same live tab, not a copy
+        #expect(!source.detach(b))
     }
 
     @Test func droppingATabOnThePageSplitsOnThatSide() {
@@ -427,6 +476,30 @@ struct EaselStoreTests {
         #expect(titles() == ["B", "A", "C"])
         #expect(store.easels(in: other.spaceID).map(\.title) == ["Elsewhere"])
         _ = (a, b)
+    }
+
+    @Test func pinnedEaselsKeepTheirOwnOrder() throws {
+        let (store, directory) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let space = UUID()
+        let a = store.createEasel(in: space, title: "A")
+        let b = store.createEasel(in: space, title: "B")
+        let c = store.createEasel(in: space, title: "C")
+        func pinned() -> [String] { store.easels(in: space).filter(\.isPinned).map(\.title) }
+        func others() -> [String] { store.easels(in: space).filter { !$0.isPinned }.map(\.title) }
+
+        store.setPinned(c.id, true)
+        store.setPinned(a.id, true) // goes after C
+        #expect(pinned() == ["C", "A"])
+        #expect(others() == ["B"])
+        // Dragged above "New Tab", to the top of the pinned ones.
+        store.move(b.id, pinned: true, toGap: 0)
+        #expect(pinned() == ["B", "C", "A"])
+        #expect(others().isEmpty)
+        // Unpinning goes to the top of the others.
+        store.setPinned(c.id, false)
+        #expect(pinned() == ["B", "A"])
+        #expect(others() == ["C"])
     }
 
     @Test func itemsStackInFrontAndImagesAreScaled() throws {

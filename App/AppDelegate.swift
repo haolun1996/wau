@@ -6,7 +6,10 @@ import Storage
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let logger = Logger(subsystem: "dev.wau.Wau", category: "App")
 
+    /// The main window (first), whose tabs are saved and synced.
     private var windowControllers: [BrowserWindowController] = []
+    /// Blank and incognito windows, which aren't kept.
+    private var extraWindows: [BrowserWindowController] = []
     private var database: AppDatabase!
     private var favicons: FaviconService!
     private var easels: EaselStore!
@@ -36,6 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let controller = BrowserWindowController(database: database, favicons: favicons, easels: easels)
+        connect(controller)
         windowControllers.append(controller)
         controller.showWindow(nil)
         controller.restoreSession()
@@ -79,6 +83,89 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.model.open(url: url)
         controller.showWindow(nil)
         NSApp.activate()
+    }
+
+    // MARK: Blank and incognito windows
+
+    /// ⌃⌘N: an empty window, in the current Space's colours. Its tabs go
+    /// when it closes; history is still recorded.
+    @objc func newBlankWindow(_ sender: Any?) {
+        openExtraWindow(.blank)
+    }
+
+    /// ⇧⌘N: a private window. Nothing it does is saved: no history, and its
+    /// cookies, logins and caches live only in memory until it closes.
+    @objc func newIncognitoWindow(_ sender: Any?) {
+        openExtraWindow(.incognito)
+    }
+
+    @discardableResult
+    private func openExtraWindow(
+        _ kind: BrowserWindowController.Kind, themeID: String? = nil, profileID: UUID? = nil, startEmpty: Bool = true
+    ) -> BrowserWindowController? {
+        guard database != nil else { return nil }
+        let themeID = themeID ?? windowControllers.first?.model.currentSpace.themeID
+        let controller = BrowserWindowController(
+            database: database, favicons: favicons, easels: easels, kind: kind, themeID: themeID, profileID: profileID
+        )
+        controller.onClose = { [weak self, weak controller] in
+            self?.extraWindows.removeAll { $0 === controller }
+        }
+        connect(controller)
+        extraWindows.append(controller)
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
+        if startEmpty { controller.newTab(nil) }
+        NSApp.activate()
+        return controller
+    }
+
+    /// Lets a window's tabs be dragged out of it and into other windows.
+    private func connect(_ controller: BrowserWindowController) {
+        controller.onTearOff = { [weak self, weak controller] tab, point in
+            guard let controller else { return }
+            self?.tearOff(tab, from: controller, at: point)
+        }
+        controller.findTab = { [weak self] id in
+            guard let self else { return nil }
+            for window in windowControllers + extraWindows {
+                if let tab = window.model.allTabs.first(where: { $0.id == id }) { return (tab, window) }
+            }
+            return nil
+        }
+        // Every window's pages take a dragged tab, not only its own window's.
+        controller.onTabDragChanged = { [weak self] dragging in
+            guard let self else { return }
+            for window in windowControllers + extraWindows { window.content.isTabDragActive = dragging }
+        }
+    }
+
+    /// A tab dragged out of a window onto the desktop moves to a new window
+    /// there: a Blank Window, or an incognito one from an incognito window.
+    /// It keeps its page, history and website data.
+    private func tearOff(_ tab: Tab, from source: BrowserWindowController, at point: NSPoint) {
+        let space = source.model.space(containing: tab)
+        let kind: BrowserWindowController.Kind = source.kind == .incognito ? .incognito : .blank
+        guard let window = openExtraWindow(kind, themeID: space?.themeID, profileID: space?.profileID, startEmpty: false)
+        else { return }
+        source.model.detach(tab)
+        window.model.adopt(tab)
+        source.closeIfEmptied() // its only tab left: the window moved, in effect
+        // A bit smaller than the window it came from, its top left just
+        // above and left of where the tab was let go.
+        if let sourceFrame = source.window?.frame,
+           let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }) ?? NSScreen.main {
+            let frame = NSRect(
+                x: 0, y: 0,
+                width: max(min(sourceFrame.width * 0.8, 1280), 800),
+                height: max(min(sourceFrame.height * 0.8, 860), 560)
+            )
+            window.window?.setContentSize(frame.size)
+            var origin = NSPoint(x: point.x - 120, y: point.y + 16 - frame.height)
+            origin.x = min(max(origin.x, screen.visibleFrame.minX), screen.visibleFrame.maxX - frame.width)
+            origin.y = min(max(origin.y, screen.visibleFrame.minY), screen.visibleFrame.maxY - frame.height)
+            window.window?.setFrameOrigin(origin)
+        }
     }
 
     @objc func newLittleWauWindow(_ sender: Any?) {

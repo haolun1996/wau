@@ -89,6 +89,16 @@ struct EaselSyncTests {
         #expect(SyncMapping.easels(from: old).easels.first?.position == 0)
     }
 
+    @Test func pinnedEaselsRoundTrip() {
+        var snapshot = sample
+        snapshot.easels[0].isPinned = true
+        let fields = SyncMapping.fields(from: snapshot)
+        #expect(fields["easel:00000000-0000-0000-0000-0000000000E1"]?["pinned"] == "1")
+        #expect(SyncMapping.easels(from: fields) == snapshot)
+        // Unpinned Easels (and older records) carry no flag.
+        #expect(SyncMapping.fields(from: sample)["easel:00000000-0000-0000-0000-0000000000E1"]?["pinned"] == nil)
+    }
+
     @Test func pointDecodingSkipsMalformedPairs() {
         #expect(EaselPoint.decode("0.5,0.5 junk 1,2,3 0,1") == [EaselPoint(x: 0.5, y: 0.5), EaselPoint(x: 0, y: 1)])
         #expect(EaselPoint.decode("") == [])

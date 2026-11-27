@@ -265,13 +265,19 @@ final class BrowserModel {
 
     /// Takes in a tab from elsewhere (Little Wau) as the current Space's
     /// newest tab, keeping its page and history.
-    func adopt(_ tab: Tab) {
+    /// Takes in a tab from elsewhere (Little Wau, another window) at the top
+    /// of the current Space, selected. A tab on another profile's website
+    /// data is reopened on this Space's; that's the tab returned.
+    @discardableResult
+    func adopt(_ tab: Tab) -> Tab {
         let space = currentSpace
-        let adopted = space.profileID == nil ? tab : recreate(tab, profileID: space.profileID)
+        let sameStore = tab.webView.configuration.websiteDataStore === Profiles.dataStore(for: space.profileID)
+        let adopted = sameStore ? tab : recreate(tab, profileID: space.profileID)
         wire(adopted)
         space.tabs.insert(adopted, at: 0)
         markSelected(adopted, in: space)
         changed()
+        return adopted
     }
 
     /// Shows `tab`, switching to its Space if needed.
@@ -285,6 +291,26 @@ final class BrowserModel {
 
     /// Regular tabs close. Pinned tabs and favorites go back to their pinned
     /// page and unload instead, as in Arc.
+    /// Takes a tab out of this window, still open, to move it to another
+    /// (dragged out of the window). Favorites stay.
+    @discardableResult
+    func detach(_ tab: Tab) -> Bool {
+        guard let space = space(containing: tab) else { return false }
+        let wasPinned = space.pinned.contains { $0 === tab }
+        let list = wasPinned ? space.pinned : space.tabs
+        guard let index = list.firstIndex(where: { $0 === tab }) else { return false }
+        if wasPinned { space.pinned.remove(at: index) } else { space.tabs.remove(at: index) }
+        if space.selectedTabID == tab.id {
+            // The neighbour in the same list takes over, as when closing.
+            let siblings = wasPinned ? space.pinned : space.tabs
+            let next = siblings.isEmpty ? (space.tabs.first ?? space.pinned.first) : siblings[min(index, siblings.count - 1)]
+            space.selectedTabID = nil
+            if let next { markSelected(next, in: space) }
+        }
+        changed()
+        return true
+    }
+
     func close(_ tab: Tab) {
         if let index = favorites.firstIndex(where: { $0 === tab }) {
             favorites[index] = reset(tab, profileID: nil)

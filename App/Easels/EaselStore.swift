@@ -68,25 +68,45 @@ final class EaselStore {
         onChange?()
     }
 
-    /// Moves an Easel to `gap` among its Space's Easels (0 is the top), and
-    /// renumbers them so the order saves and syncs.
-    func move(_ id: UUID, toGap gap: Int) {
-        guard let moving = easel(withID: id) else { return }
-        var ordered = easels(in: moving.spaceID)
-        guard let from = ordered.firstIndex(where: { $0.id == id }) else { return }
-        ordered.remove(at: from)
-        // Gaps after the Easel's old place shift up by one once it's lifted out.
-        let target = min(max(gap > from ? gap - 1 : gap, 0), ordered.count)
-        ordered.insert(moving, at: target)
+    /// Moves an Easel to `gap` among its Space's pinned Easels or its other
+    /// Easels (0 is the top of that group), pinning or unpinning it on the
+    /// way, and renumbers them so the order saves and syncs.
+    func move(_ id: UUID, pinned: Bool? = nil, toGap gap: Int) {
+        guard var moving = easel(withID: id) else { return }
+        let pinned = pinned ?? moving.isPinned
+        let all = easels(in: moving.spaceID)
+        var group = all.filter { $0.isPinned == pinned }
+        var target = gap
+        if let from = group.firstIndex(where: { $0.id == id }) {
+            group.remove(at: from)
+            // Gaps after the Easel's old place shift up by one once it's lifted out.
+            if gap > from { target -= 1 }
+        }
+        moving.isPinned = pinned
+        group.insert(moving, at: min(max(target, 0), group.count))
+        let others = all.filter { $0.isPinned != pinned && $0.id != id }
+        // Pinned Easels number first, so each group keeps its own order.
+        let ordered = pinned ? group + others : others + group
         var changed: [Easel] = []
-        for (number, easel) in ordered.enumerated() where easel.position != number + 1 {
-            guard let index = snapshot.easels.firstIndex(where: { $0.id == easel.id }) else { continue }
+        for (number, easel) in ordered.enumerated() {
+            guard let index = snapshot.easels.firstIndex(where: { $0.id == easel.id }),
+                  snapshot.easels[index].position != number + 1 || snapshot.easels[index].isPinned != easel.isPinned
+            else { continue }
             snapshot.easels[index].position = number + 1
+            snapshot.easels[index].isPinned = easel.isPinned
             changed.append(snapshot.easels[index])
         }
         guard !changed.isEmpty else { return }
         persist { database in try changed.forEach(database.saveEasel) }
         onChange?()
+    }
+
+    /// Pins an Easel (to the end of the pinned ones) or unpins it (to the
+    /// top of the others).
+    func setPinned(_ id: UUID, _ pinned: Bool) {
+        guard let easel = easel(withID: id), easel.isPinned != pinned else { return }
+        let end = easels(in: easel.spaceID).filter(\.isPinned).count
+        move(id, pinned: pinned, toGap: pinned ? end : 0)
     }
 
     func delete(_ id: UUID) {
